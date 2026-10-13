@@ -404,40 +404,6 @@ Please use clone() or contiguous() to copy the tensor before writing""",
     ):
       torch.index_copy(self_tensor, 0, index, source, out=t)
 
-  @et.why_tpu_only("Testing TPU OOM behavior.")
-  def test_mm_with_oom_result(self):
-    """Tests that mm with a large result that OOMs fails with expected error."""
-
-    # Each input tensor is 4 MB.
-    t1 = torch.ones(2**20, 1, device=et.device(), dtype=torch.float32)
-    t2 = torch.ones(1, 2**20, device=et.device(), dtype=torch.float32)
-    # The result tensor would need 4 TB, which is impossible to allocate.
-    t3 = torch.mm(t1, t2)
-    # Error message format from XLA varies. Known examples:
-    # ```
-    #   failed to compile MLIR module -- the XLA compiler failed with: e1000:
-    #   CompileTimeHbmOom: Ran out of memory on HBM, the total memory required
-    #   for HLO temporaries (4.00T) exceeds available HBM (15.75G). HLO module:
-    #   tt_jit_mm.
-    # ```
-    # ```
-    #   failed to compile MLIR module -- the XLA compiler failed with:
-    #   allocation (size=4398046511104) would exceed memory (size=17179869184)
-    #   :: %s2 = inlined_call_operand.hbm
-    #   [shape: f32[1048576,1048576], index: 2, kind: output, shape index: {}]
-    #   /* operand 2 */ :: broadcast_multiply_fusion
-    # ```
-    # Regex will match either of these.
-    with et.assert_raises_message(
-        RuntimeError,
-        tpu=re.compile(
-            r""".*failed to compile MLIR module.+the XLA compiler failed with:.+(exceeds available HBM|allocation.+would exceed memory).*""",
-            re.DOTALL,
-        ),
-    ):
-      t3.to("cpu")
-    tt_testing.reset_eager_state()
-
   @et.why_tpu_only(
       "PyTorch CUDA _mm_dtype_cuda indexes self.size(0) and mat2.size(1)"
       " before check_mm_shapes, raising IndexError instead of RuntimeError."

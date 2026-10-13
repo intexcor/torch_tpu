@@ -39,6 +39,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
@@ -564,6 +565,26 @@ const CompilationSpec& GetCompilationSpecForTraversal(
 
   return compilation_specs.at(compilation_mode);
 }
+
+// Translates a low-level XLA OOM error to an error that is easier to understand
+// by a pytorch user. If the status is not an XLA OOM error, returns it as is.
+//
+// `dtype` is the element type of the tensor that caused the XLA OOM error.
+// `dims` is the dimensions of the tensor that caused the XLA OOM error.
+absl::Status TranslateXlaTensorOomError(absl::Status status,
+                                        mlir::ElementType dtype,
+                                        absl::Span<const int64_t> dims) {
+  if (status.ok()) {
+    return status;
+  }
+
+  TT_RET_CHECK(!IsXlaOomError(status), error::kResourceExhausted)
+      << "the TPU ran out of memory while allocating tensor " << ToString(dtype)
+      << "[" << absl::StrJoin(dims, ", ") << "]";
+
+  // From this point, we know that the given status is not an XLA OOM error.
+  return status;
+}
 }  // namespace
 
 absl::StatusOr<std::vector<SharedLoadedExecutableWithMetadata>>
@@ -696,6 +717,7 @@ absl::Status ExecutionTask::RunInternal() {
   if (!name_.empty()) {
     task_name = name_;
   }
+  const DeviceBufferRef& output = outputs_.front();
 
   // Wait for compilation to complete.
   ABSL_VLOG(1) << "[ExecutionTask::Run] Waiting for compilation for "
@@ -703,7 +725,9 @@ absl::Status ExecutionTask::RunInternal() {
                << task_name;
   TT_ASSIGN_OR_RETURN(
       std::vector<SharedLoadedExecutableWithMetadata> cached_executables,
-      GetCachedExecutables(task_name));
+      GetCachedExecutables(task_name),
+      TranslateXlaTensorOomError(_, output.element_type(),
+                                 output.dimensions()));
   ABSL_VLOG(1) << "[ExecutionTask::Run] Cached executables size: "
                << cached_executables.size();
 
@@ -721,7 +745,9 @@ absl::Status ExecutionTask::RunInternal() {
   TT_ASSIGN_OR_RETURN(
       PjRtBufferPointers final_results,
       RunSequentialExecutables(cached_executables, std::move(argument_buffers),
-                               output_shapes, task_name));
+                               output_shapes, task_name),
+      TranslateXlaTensorOomError(_, output.element_type(),
+                                 output.dimensions()));
 
   // Assign the final results to the output nodes.
   TT_RETURN_IF_ERROR(SetOutputNodesAsMaterialized(std::move(final_results)));

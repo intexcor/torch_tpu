@@ -1070,7 +1070,15 @@ void TranslateToC10ErrorAndThrow(const TtError& e) {
     case error::kPythonNotImplementedError:
       throw  // Translates to Python NotImplementedError.
           c10::NotImplementedError(e.thrown_from(), message);
+    case error::kResourceExhausted:
+      throw  // Translates to Python torch.OutOfMemoryError.
+          c10::OutOfMemoryError(e.thrown_from(), message);
     default:
+      // Fallback: unhandled error codes translate to c10::Error (Python
+      // RuntimeError). If a status code corresponds to a dedicated PyTorch
+      // exception type (e.g. c10::OutOfMemoryError, c10::IndexError, or
+      // c10::ValueError), add an explicit case above instead of relying on
+      // this default fallback.
       throw  // Translates to Python RuntimeError.
           c10::Error(e.thrown_from(), message);
   }

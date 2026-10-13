@@ -1370,6 +1370,20 @@ class TpuVsGpuErrorTest(et.ErrorTestBase):
     ):
       torch.mm(t1, t2)
 
+  def test_mm_with_oom_result(self):
+    """Tests that OOM raises OutOfMemoryError."""
+    with et.assert_raises_message(
+        torch.OutOfMemoryError,
+        tpu="""the TPU ran out of memory while allocating tensor uint8[107374182400]""",
+        gpu="""CUDA out of memory""",
+    ):
+      # GPU raises torch.OutOfMemoryError here (eager allocation of 100 GiB):
+      b = torch.empty(100 * 1024**3, dtype=torch.uint8, device=et.device())
+      b.fill_(1)
+      # TPU defers allocation/execution and raises torch.OutOfMemoryError here
+      # upon materialization:
+      b[:8].sum().item()
+
   @parameterized.named_parameters(
       dict(
           testcase_name="bool",
