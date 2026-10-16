@@ -44,7 +44,7 @@ def _load_diffusers_wan(
   device_str = ctx.device_kind.value
 
   with torch.device(device_str):
-    model = module_spec.module_factory().to(dtype=dtype)
+    model = module_spec.module_factory(dtype=dtype)
   model.apply(model_helpers.init_small_random_weights)
 
   if is_training:

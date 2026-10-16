@@ -145,7 +145,7 @@ def default_load_model(
 
   device_str = ctx.device_kind.value
   with torch.device(device_str):
-    model = module_spec.module_factory().to(dtype=dtype)
+    model = module_spec.module_factory(dtype=dtype)
   _run_blip_forward_on_model_device(model)
 
   if is_training:

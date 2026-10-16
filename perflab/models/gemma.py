@@ -401,7 +401,8 @@ def _load_hf_gemma_ragged_moe(
   with torch.device(ctx.device_kind.value):
     for layer in model.model.language_model.layers:
       if getattr(layer, "enable_moe_block", False):
-        layer.experts = ragged_moe.RaggedExpertsGemma4(text_config).to(dtype)
+        layer.experts = None
+        layer.experts = ragged_moe.RaggedExpertsGemma4(text_config, dtype=dtype)
   # Randomly initialized weights overflow in bfloat16 without rescaling.
   model.apply(model_helpers.init_small_random_weights)
   # Gemma 4 takes `mm_token_type_ids` only with image inputs.

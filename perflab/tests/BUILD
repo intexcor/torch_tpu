@@ -191,6 +191,7 @@ torch_tpu_py_test(
         "//perflab:target",
         "//shims/absl_py/testing:absltest",
         "//shims/absl_py/testing:flagsaver",
+        "//shims/torch:pytorch",
         "//src/torch_tpu",
         "//tests:seed_test_utils",
     ],

@@ -49,7 +49,7 @@ def _load_hf_vjepa2(
   )
 
   with torch.device(device_str):
-    model = module_spec.module_factory().to(dtype=dtype)
+    model = module_spec.module_factory(dtype=dtype)
   model.apply(model_helpers.init_small_random_weights)
   model.eval()
 

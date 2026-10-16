@@ -29,7 +29,23 @@ class TorchtitanMuseGlimmerTest(seed_test_utils.RepeatableTest):
     self.assertIsNone(config.vision_encoder)
 
     torch.manual_seed(123)
-    model = torchtitan_muse_glimmer.build_model(config, "cpu", torch.bfloat16)
+    meta_param_dtypes: list[torch.dtype] = []
+    orig_to_empty = torch.nn.Module.to_empty
+
+    def spy_to_empty(module, *args, **kwargs):
+      meta_param_dtypes.extend(
+          p.dtype for p in module.parameters() if p.is_floating_point()
+      )
+      return orig_to_empty(module, *args, **kwargs)
+
+    with absltest.mock.patch.object(torch.nn.Module, "to_empty", spy_to_empty):
+      model = torchtitan_muse_glimmer.build_model(config, "cpu", torch.bfloat16)
+
+    self.assertEqual(torch.get_default_dtype(), torch.float32)
+    self.assertNotEmpty(meta_param_dtypes)
+    self.assertEqual(set(meta_param_dtypes), {torch.bfloat16})
+    for p in model.parameters():
+      self.assertEqual(p.dtype, torch.bfloat16)
 
     # Check that complex rope cache is preserved and matches fp32.
     torch.manual_seed(123)

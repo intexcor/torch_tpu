@@ -38,7 +38,7 @@ def _load_timm_model(
   device_str = ctx.device_kind.value
 
   with torch.device(device_str):
-    model = module_spec.module_factory().to(dtype=dtype)
+    model = module_spec.module_factory(dtype=dtype)
 
   if is_training:
     model.train()

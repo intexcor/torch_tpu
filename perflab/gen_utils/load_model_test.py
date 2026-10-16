@@ -49,7 +49,9 @@ def _deberta_config(
 def _fake_registry(model: nn.Module, inputs: dict[str, Any]) -> Any:
   """Returns a module registry whose only module spec yields `model`."""
   module_spec = types.SimpleNamespace(
-      module_factory=lambda: model,
+      module_factory=lambda dtype=None: (
+          model.to(dtype=dtype) if dtype is not None else model
+      ),
       sample_inputs_factory=lambda shape, device: (None, dict(inputs)),
   )
   return types.SimpleNamespace(
@@ -79,7 +81,7 @@ def _fake_time_series_registry(config: types.SimpleNamespace) -> Any:
     del args, kwargs  # Unused.
     hooked_config = modify_config_hook(config)
     return types.SimpleNamespace(
-        module_factory=lambda: _FakeTimeSeriesModel(hooked_config),
+        module_factory=lambda dtype=None: _FakeTimeSeriesModel(hooked_config),
         sample_inputs_factory=lambda shape, device: (
             None,
             {
@@ -112,7 +114,7 @@ def _fake_text_registry(config: types.SimpleNamespace) -> Any:
     del args, kwargs  # Unused.
     hooked_config = modify_config_hook(config)
     return types.SimpleNamespace(
-        module_factory=lambda: _FakeTextModel(hooked_config),
+        module_factory=lambda dtype=None: _FakeTextModel(hooked_config),
         sample_inputs_factory=lambda shape, device: (
             None,
             {"input_ids": torch.zeros(shape, dtype=torch.long)},
