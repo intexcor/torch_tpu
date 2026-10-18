@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +34,7 @@
 #include "csrc/common/device_utils.h"
 #include "csrc/common/env_vars.h"
 #include "csrc/common/error_utils.h"
+#include "csrc/common/tpu_hardware.h"
 #include "csrc/distributed/slicebuilder/discovery.h"
 
 namespace torch_tpu {
@@ -187,6 +189,34 @@ void EnsureUndefokFlag(std::string_view flag_name,
   });
 }
 
+// TPU_VISIBLE_DEVICES is our source of truth for device visibility.
+// Because libtpu prioritizes TPU_VISIBLE_CHIPS over TPU_VISIBLE_DEVICES when
+// non-empty, we explicitly overwrite TPU_VISIBLE_CHIPS to match
+// TPU_VISIBLE_DEVICES so that external settings do not override device
+// selection.
+void SelectVisibleDevice(std::string_view default_dev) {
+  const std::optional<std::string>& visible_devices_env =
+      GetEnvOnce<kTpuVisibleDevicesEnvVar>();
+  const std::string target_dev =
+      GetSingleDeviceOrDefault(visible_devices_env.value_or(""), default_dev);
+  SetEnv<kTpuVisibleDevicesEnvVar>(target_dev);
+  SetEnv<kTpuVisibleChipsEnvVar>(target_dev);
+}
+
+// Sets the libtpu host/process bounds environment variables and enables
+// concurrent libtpu loads across processes on the same host.
+void SetTpuBoundsEnv(const std::string& host_bounds,
+                     const std::string& chips_bounds) {
+  SetEnv<kTpuHostBoundsEnvVar>(host_bounds);
+  SetEnv<kTpuChipsPerHostBoundsEnvVar>(chips_bounds);
+  SetEnv<kTpuProcessBoundsEnvVar>(host_bounds);
+  SetEnv<kTpuChipsPerProcessBoundsEnvVar>(chips_bounds);
+
+  // Avoid multi-process libtpu lock file collisions across distributed workers
+  // or independent single-device processes on the same host, see b/487769788.
+  SetEnv<kAllowMultipleLibtpuLoadEnvVar>("1");
+}
+
 }  // namespace
 
 absl::Status InitializeDistributedEnvironment(
@@ -203,28 +233,13 @@ absl::Status InitializeDistributedEnvironment(
   const int slice_rank = config.rank % static_cast<int>(addresses.size());
   SetEnv<kCloudTpuTaskIdEnvVar>(absl::StrCat(slice_rank));
 
-  // TPU_VISIBLE_DEVICES is our source of truth for device visibility.
-  // Because libtpu prioritizes TPU_VISIBLE_CHIPS over TPU_VISIBLE_DEVICES when
-  // non-empty, we explicitly overwrite TPU_VISIBLE_CHIPS to match
-  // TPU_VISIBLE_DEVICES so that external settings do not override device
-  // selection.
-  const auto& visible_devices_env = GetEnvOnce<kTpuVisibleDevicesEnvVar>();
-  const std::string target_dev = (visible_devices_env.has_value() &&
-                                  IsSingleDeviceSpecified(*visible_devices_env))
-                                     ? *visible_devices_env
-                                     : absl::StrCat(config.local_rank);
-  SetEnv<kTpuVisibleDevicesEnvVar>(target_dev);
-  SetEnv<kTpuVisibleChipsEnvVar>(target_dev);
+  SelectVisibleDevice(absl::StrCat(config.local_rank));
 
   const std::vector<std::string> topology_dims =
       absl::StrSplit(config.topology, ',');
   const std::string chips_bounds =
       (topology_dims.size() == 4) ? "1,1,1,1" : "1,1,1";
-
-  SetEnv<kTpuHostBoundsEnvVar>(config.topology);
-  SetEnv<kTpuChipsPerHostBoundsEnvVar>(chips_bounds);
-  SetEnv<kTpuProcessBoundsEnvVar>(config.topology);
-  SetEnv<kTpuChipsPerProcessBoundsEnvVar>(chips_bounds);
+  SetTpuBoundsEnv(config.topology, chips_bounds);
 
   // The free slicebuilder port of this process.
   SetEnv<kTpuProcessPortEnvVar>(config.sb_port);
@@ -240,28 +255,17 @@ absl::Status InitializeDistributedEnvironment(
   // The addresses of all other workers in the slice.
   SetEnv<kTpuProcessAddressesEnvVar>(absl::StrJoin(addresses, ","));
 
-  // Avoid multi-process libtpu lock in GCP init, see b/487769788.
-  SetEnv<kAllowMultipleLibtpuLoadEnvVar>("1");
-
   const std::string libtpu_init_args_str =
       ConfigureLibtpuInitArgs(GetEnvOnce<kLibtpuInitArgsEnvVar>().value_or(""));
   SetEnv<kLibtpuInitArgsEnvVar>(libtpu_init_args_str);
   return absl::OkStatus();
 }
 
-absl::Status InitializeSingleDeviceEnvironment() {
-  // TPU_VISIBLE_DEVICES is our source of truth for device visibility.
-  // Because libtpu prioritizes TPU_VISIBLE_CHIPS over TPU_VISIBLE_DEVICES when
-  // non-empty, we explicitly overwrite TPU_VISIBLE_CHIPS to match
-  // TPU_VISIBLE_DEVICES so that external settings do not override device
-  // selection.
-  const auto& visible_devices_env = GetEnvOnce<kTpuVisibleDevicesEnvVar>();
-  const std::string target_dev = (visible_devices_env.has_value() &&
-                                  IsSingleDeviceSpecified(*visible_devices_env))
-                                     ? *visible_devices_env
-                                     : "0";
-  SetEnv<kTpuVisibleDevicesEnvVar>(target_dev);
-  SetEnv<kTpuVisibleChipsEnvVar>(target_dev);
+absl::Status InitializeSingleDeviceEnvironment(
+    std::string_view pci_devices_dir) {
+  SelectVisibleDevice("0");
+  const std::string bounds(GetSingleDeviceTpuBoundsString(pci_devices_dir));
+  SetTpuBoundsEnv(bounds, bounds);
   return absl::OkStatus();
 }
 

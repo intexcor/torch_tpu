@@ -616,5 +616,36 @@ TEST(GetTpuDeviceCountAndTopologyTest,
   EXPECT_EQ(topology.status().message(), "No TPU topology found for count: 3");
 }
 
+TEST(GetSingleDeviceTpuBoundsStringTest,
+     Returns3DBoundsWhenNoSupportedTpuIsPresent) {
+  ScopedFakeHardwareDir fake;
+  EXPECT_EQ(GetSingleDeviceTpuBoundsString(fake.pci_devices_dir()), "1,1,1");
+  EXPECT_EQ(GetSingleDeviceTpuBoundsString(
+                absl::StrCat(fake.pci_devices_dir(), "/nonexistent")),
+            "1,1,1");
+}
+
+TEST(GetSingleDeviceTpuBoundsStringTest,
+     Returns3DBoundsForSingleDevicePerChipGenerations) {
+  for (std::string_view device_id : {"0x0062", "0x0063", "0x006f", "0x007c"}) {
+    ScopedFakeHardwareDir fake;
+    fake.AddPciDevice("0000:00:04.0", "0x1ae0", device_id, "0",
+                      /*vfio_exposed=*/false);
+    EXPECT_EQ(GetSingleDeviceTpuBoundsString(fake.pci_devices_dir()), "1,1,1")
+        << device_id;
+  }
+}
+
+TEST(GetSingleDeviceTpuBoundsStringTest,
+     Returns4DBoundsForMultiDevicePerChipGenerations) {
+  for (std::string_view device_id : {"0x0076", "0x0083"}) {
+    ScopedFakeHardwareDir fake;
+    fake.AddPciDevice("0000:00:04.0", "0x1ae0", device_id, "0",
+                      /*vfio_exposed=*/false);
+    EXPECT_EQ(GetSingleDeviceTpuBoundsString(fake.pci_devices_dir()), "1,1,1,1")
+        << device_id;
+  }
+}
+
 }  // namespace
 }  // namespace torch_tpu

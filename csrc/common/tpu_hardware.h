@@ -129,6 +129,12 @@ absl::StatusOr<std::optional<std::string>> GetTpuTopology(
     std::string_view pci_devices_dir = "/sys/bus/pci/devices",
     std::string_view vfio_dir = "/dev/vfio");
 
+// Returns the single-device TPU bounds string ("1,1,1,1" for TPU generations
+// with multiple devices per chip without megacore, or "1,1,1" otherwise) for
+// the TPU generation attached under `pci_devices_dir`.
+[[nodiscard]] std::string_view GetSingleDeviceTpuBoundsString(
+    std::string_view pci_devices_dir = "/sys/bus/pci/devices");
+
 // Returns whether any device node through which libtpu could reach a TPU
 // exists:
 // - a VFIO group node `<dev_dir>/vfio/<number>` (not the container node

@@ -16,12 +16,19 @@
 
 #include "csrc/common/environment.h"
 
+#include <ftw.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <string>
+#include <string_view>
 
+#include "absl/log/absl_check.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "csrc/common/env_vars.h"
 #include "csrc/distributed/slicebuilder/discovery.h"
 #include "gtest/gtest.h"
@@ -30,6 +37,40 @@ namespace torch_tpu {
 namespace {
 
 using testing::ExitedWithCode;
+
+class ScopedFakePciDir {
+ public:
+  ScopedFakePciDir() {
+    std::string tmpl = absl::StrCat(testing::TempDir(), "/fake_pci_XXXXXX");
+    char* const created = mkdtemp(tmpl.data());
+    ABSL_CHECK(created != nullptr);
+    dir_ = created;
+  }
+
+  ~ScopedFakePciDir() {
+    nftw(
+        dir_.c_str(),
+        [](const char* fpath, const struct stat*, int, struct FTW*) {
+          return remove(fpath);
+        },
+        /*nopenfd=*/16, FTW_DEPTH | FTW_PHYS);
+  }
+
+  ScopedFakePciDir(const ScopedFakePciDir&) = delete;
+  ScopedFakePciDir& operator=(const ScopedFakePciDir&) = delete;
+
+  const std::string& path() const { return dir_; }
+
+  void AddTpuDevice(std::string_view slot, std::string_view device_id) {
+    const std::string dev_dir = absl::StrCat(dir_, "/", slot);
+    ABSL_CHECK_EQ(mkdir(dev_dir.c_str(), 0700), 0);
+    std::ofstream(absl::StrCat(dev_dir, "/vendor")) << "0x1ae0\n";
+    std::ofstream(absl::StrCat(dev_dir, "/device")) << device_id << "\n";
+  }
+
+ private:
+  std::string dir_;
+};
 
 TEST(EnvironmentDeathTest,
      InitializeDistributedEnvironment_PopulatesSlicebuilderAddresses) {
@@ -491,55 +532,121 @@ TEST(EnvironmentDeathTest,
 
 TEST(EnvironmentDeathTest,
      InitSingleDevEnv_RespectsExistingSingleTpuVisibleDevicesEnvVar) {
+  ScopedFakePciDir pci;
   EXPECT_EXIT(
       {
+        unsetenv(kAllowMultipleLibtpuLoadEnvVar);
+        unsetenv(kTorchTpuTopologyEnvVar);
+        unsetenv(kTpuHostBoundsEnvVar);
+        unsetenv(kTpuChipsPerHostBoundsEnvVar);
+        unsetenv(kTpuProcessBoundsEnvVar);
+        unsetenv(kTpuChipsPerProcessBoundsEnvVar);
         setenv(kTpuVisibleDevicesEnvVar, "3", 1);
-        EXPECT_TRUE(InitializeSingleDeviceEnvironment().ok());
+        EXPECT_TRUE(InitializeSingleDeviceEnvironment(pci.path()).ok());
         EXPECT_STREQ(std::getenv(kTpuVisibleDevicesEnvVar), "3");
         EXPECT_STREQ(std::getenv(kTpuVisibleChipsEnvVar), "3");
-        _exit(0);
+        EXPECT_EQ(std::getenv(kTorchTpuTopologyEnvVar), nullptr);
+        EXPECT_STREQ(std::getenv(kTpuHostBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kTpuChipsPerHostBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kTpuProcessBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kTpuChipsPerProcessBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kAllowMultipleLibtpuLoadEnvVar), "1");
+        _exit(testing::Test::HasFailure() ? 1 : 0);
       },
       ExitedWithCode(0), "");
 }
 
 TEST(EnvironmentDeathTest,
      InitSingleDevEnv_OverwritesMultiDeviceTpuVisibleDevicesEnvVar) {
+  ScopedFakePciDir pci;
   EXPECT_EXIT(
       {
         setenv(kTpuVisibleDevicesEnvVar, "0,1", 1);
-        EXPECT_TRUE(InitializeSingleDeviceEnvironment().ok());
+        EXPECT_TRUE(InitializeSingleDeviceEnvironment(pci.path()).ok());
         EXPECT_STREQ(std::getenv(kTpuVisibleDevicesEnvVar), "0");
         EXPECT_STREQ(std::getenv(kTpuVisibleChipsEnvVar), "0");
-        _exit(0);
+        EXPECT_STREQ(std::getenv(kTpuHostBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kTpuChipsPerHostBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kTpuProcessBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kTpuChipsPerProcessBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kAllowMultipleLibtpuLoadEnvVar), "1");
+        _exit(testing::Test::HasFailure() ? 1 : 0);
       },
       ExitedWithCode(0), "");
 }
 
 TEST(EnvironmentDeathTest,
      InitSingleDevEnv_FallsBackOnMalformedTpuVisibleDevicesEnvVar) {
+  ScopedFakePciDir pci;
   EXPECT_EXIT(
       {
         setenv(kTpuVisibleDevicesEnvVar, "invalid_dev", 1);
-        EXPECT_TRUE(InitializeSingleDeviceEnvironment().ok());
+        EXPECT_TRUE(InitializeSingleDeviceEnvironment(pci.path()).ok());
         EXPECT_STREQ(std::getenv(kTpuVisibleDevicesEnvVar), "0");
         EXPECT_STREQ(std::getenv(kTpuVisibleChipsEnvVar), "0");
-        _exit(0);
+        _exit(testing::Test::HasFailure() ? 1 : 0);
       },
       ExitedWithCode(0), "");
 }
 
 TEST(EnvironmentDeathTest,
      InitSingleDevEnv_OverwritesExistingTpuVisibleChipsEnvVar) {
+  ScopedFakePciDir pci;
   EXPECT_EXIT(
       {
+        unsetenv(kAllowMultipleLibtpuLoadEnvVar);
+        unsetenv(kTorchTpuTopologyEnvVar);
+        unsetenv(kTpuHostBoundsEnvVar);
+        unsetenv(kTpuChipsPerHostBoundsEnvVar);
+        unsetenv(kTpuProcessBoundsEnvVar);
+        unsetenv(kTpuChipsPerProcessBoundsEnvVar);
         setenv(kTpuVisibleChipsEnvVar, "2", 1);
         unsetenv(kTpuVisibleDevicesEnvVar);
-        EXPECT_TRUE(InitializeSingleDeviceEnvironment().ok());
+        EXPECT_TRUE(InitializeSingleDeviceEnvironment(pci.path()).ok());
         EXPECT_STREQ(std::getenv(kTpuVisibleDevicesEnvVar), "0");
         EXPECT_STREQ(std::getenv(kTpuVisibleChipsEnvVar), "0");
-        _exit(0);
+        EXPECT_EQ(std::getenv(kTorchTpuTopologyEnvVar), nullptr);
+        EXPECT_STREQ(std::getenv(kTpuHostBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kTpuChipsPerHostBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kTpuProcessBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kTpuChipsPerProcessBoundsEnvVar), "1,1,1");
+        EXPECT_STREQ(std::getenv(kAllowMultipleLibtpuLoadEnvVar), "1");
+        _exit(testing::Test::HasFailure() ? 1 : 0);
       },
       ExitedWithCode(0), "");
+}
+
+TEST(EnvironmentDeathTest, InitSingleDevEnv_SetsBoundsForAllSupportedTpuSpecs) {
+  for (std::string_view device_id : {"0x0062", "0x0063", "0x006f", "0x007c"}) {
+    ScopedFakePciDir pci;
+    pci.AddTpuDevice("0000:00:04.0", device_id);
+    EXPECT_EXIT(
+        {
+          EXPECT_TRUE(InitializeSingleDeviceEnvironment(pci.path()).ok());
+          EXPECT_STREQ(std::getenv(kTpuHostBoundsEnvVar), "1,1,1");
+          EXPECT_STREQ(std::getenv(kTpuChipsPerHostBoundsEnvVar), "1,1,1");
+          EXPECT_STREQ(std::getenv(kTpuProcessBoundsEnvVar), "1,1,1");
+          EXPECT_STREQ(std::getenv(kTpuChipsPerProcessBoundsEnvVar), "1,1,1");
+          _exit(testing::Test::HasFailure() ? 1 : 0);
+        },
+        ExitedWithCode(0), "")
+        << device_id;
+  }
+  for (std::string_view device_id : {"0x0076", "0x0083"}) {
+    ScopedFakePciDir pci;
+    pci.AddTpuDevice("0000:00:04.0", device_id);
+    EXPECT_EXIT(
+        {
+          EXPECT_TRUE(InitializeSingleDeviceEnvironment(pci.path()).ok());
+          EXPECT_STREQ(std::getenv(kTpuHostBoundsEnvVar), "1,1,1,1");
+          EXPECT_STREQ(std::getenv(kTpuChipsPerHostBoundsEnvVar), "1,1,1,1");
+          EXPECT_STREQ(std::getenv(kTpuProcessBoundsEnvVar), "1,1,1,1");
+          EXPECT_STREQ(std::getenv(kTpuChipsPerProcessBoundsEnvVar), "1,1,1,1");
+          _exit(testing::Test::HasFailure() ? 1 : 0);
+        },
+        ExitedWithCode(0), "")
+        << device_id;
+  }
 }
 
 // Unsets the env vars read by HasCustomTpuDevicePaths().

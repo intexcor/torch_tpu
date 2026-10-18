@@ -1169,6 +1169,15 @@ torch_tpu_cc_library(
     ],
 )
 
+torch_tpu_cc_test(
+    name = "device_utils_test",
+    srcs = ["device_utils_test.cc"],
+    deps = [
+        ":device_utils",
+        "//csrc/common:oss_test_main",
+    ],
+)
+
 oss_target(
     torch_tpu_cc_library,
     name = "environment",
@@ -1178,6 +1187,7 @@ oss_target(
         ":device_utils",
         ":env_vars",
         ":error_utils",
+        ":tpu_hardware",
         "//csrc/distributed/slicebuilder:discovery",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/log:absl_log",
@@ -1196,7 +1206,9 @@ oss_target(
         ":environment",
         "//csrc/common:oss_test_main",
         "//csrc/distributed/slicebuilder:discovery",
+        "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 

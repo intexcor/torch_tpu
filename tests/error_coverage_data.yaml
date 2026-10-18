@@ -50,7 +50,7 @@ csrc/eager/op_dispatcher.cc: {infeasible: 1, remaining: 0, total: 1}
 csrc/eager/op_dispatcher.h: {infeasible: 0, remaining: 0, total: 1}
 csrc/eager/tensor_to_buffer.cc: {infeasible: 2, remaining: 6, total: 11}
 csrc/eager/tpu_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 3}
-csrc/eager/tpu_hooks.cc: {infeasible: 0, remaining: 3, total: 4}
+csrc/eager/tpu_hooks.cc: {infeasible: 0, remaining: 2, total: 4}
 csrc/eager/traversal.cc: {infeasible: 1, remaining: 10, total: 13}
 csrc/experimental/batch_transfer/batch_transfer.cc: {infeasible: 0, remaining: 21, total: 21}
 csrc/internal/compile/compiled_mode.cc: {infeasible: 1, remaining: 8, total: 13}

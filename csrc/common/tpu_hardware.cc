@@ -459,6 +459,12 @@ absl::StatusOr<std::optional<std::string>> GetTpuTopology(
   return absl::StrJoin(topology, ",");
 }
 
+std::string_view GetSingleDeviceTpuBoundsString(
+    std::string_view pci_devices_dir) {
+  const TpuSpec* absl_nullable const spec = TpuSpec::Get(pci_devices_dir);
+  return (spec != nullptr && spec->devices_per_chip > 1) ? "1,1,1,1" : "1,1,1";
+}
+
 bool HasTpuDeviceNodes(std::string_view dev_dir, std::string_view dev_borg_dir,
                        std::string_view proc_devices) {
   if (HasVfioNodes(absl::StrCat(dev_dir, "/vfio"))) {

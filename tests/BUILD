@@ -460,6 +460,20 @@ torch_tpu_py_library(
         ":oss_utils",
         "//shims/torch:pytorch",
         "//src/torch_tpu",
+        "//src/torch_tpu/_internal/utils:hardware",
+    ],
+)
+
+torch_tpu_py_test(
+    name = "accelerator_test_utils_test",
+    srcs = ["accelerator_test_utils_test.py"],
+    deps = [
+        ":accelerator_test_utils",
+        ":oss_utils",
+        ":seed_test_utils",
+        "//shims/absl_py/testing:absltest",
+        "//src/torch_tpu",
+        "//src/torch_tpu/_internal/utils:hardware",
     ],
 )
 
