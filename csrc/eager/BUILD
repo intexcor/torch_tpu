@@ -436,15 +436,14 @@ torch_tpu_cc_library(
         "//csrc/common:compilation",
         "//csrc/common:compilation_spec",
         "//csrc/common:dimension_types",
-        "//csrc/common:dtype",
         "//csrc/common:dynamism_utils",
         "//csrc/common:error_utils",
+        "//csrc/common:layout_utils",
         "//csrc/common:shape",
         "//csrc/common:to_string",
         "//csrc/common:utils",
         "//csrc/ops:op_names",
         "//csrc/pjrt:pjrt_execute",
-        "//csrc/pjrt:pjrt_state",
         "//shims/torch:torch_headers",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:nullability",
@@ -460,8 +459,6 @@ torch_tpu_cc_library(
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
         "@tsl//tsl/profiler/lib:traceme",
-        "@xla//xla:shape_util",
-        "@xla//xla:xla_data_proto_cc",
         "@xla//xla/pjrt:pjrt_client",
     ],
 )
@@ -724,6 +721,10 @@ torch_tpu_cc_library(
         "//csrc/common:warnings",
         # Ensure that both TORCH_LIBRARY_IMPL values get built together always.
         ":amp_policies",  # buildcleaner: keep
+        # Registers the precompiled unbounded dynamic kernels at load time so
+        # TORCH_TPU_INTERNAL_USE_UNBOUNDED_DYNAMIC_KERNELS can serve them.
+        # Nothing references its symbols.
+        "//csrc/experimental/precompiled_kernels:kernel_registration",  # buildcleaner: keep
         "//csrc/common:to_string",
         "//csrc/ops/has_compatible_shallow_copy_type:has_compatible_shallow_copy_type_aten_kernels",
         "//csrc/ops/pooling",

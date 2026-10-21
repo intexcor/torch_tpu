@@ -30,6 +30,7 @@
 #include "csrc/common/compilation.h"
 #include "csrc/common/compilation_spec.h"
 #include "csrc/common/shape.h"
+#include "xla/layout.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
 
@@ -66,11 +67,14 @@ class UnboundedDynamicKernelRegistry {
 
   // Returns the first kernel registered under `key`, in registration order,
   // whose compatibility predicate accepts the given logical input and output
-  // shapes, or null if there is none.
+  // shapes and their resolved on-device layouts (parallel to the shapes), or
+  // null if there is none.
   [[nodiscard]] const UnboundedDynamicKernel* absl_nullable
-  FindUnboundedDynamicKernel(const ShapelessKey& key,
-                             absl::Span<const Shape> input_shapes,
-                             absl::Span<const Shape> output_shapes) const;
+  FindUnboundedDynamicKernel(
+      const ShapelessKey& key, absl::Span<const Shape> input_shapes,
+      absl::Span<const xla::Layout> input_layouts,
+      absl::Span<const Shape> output_shapes,
+      absl::Span<const xla::Layout> output_layouts) const;
 
   // Returns the execution metadata of the kernel registered under exactly
   // `key`, or null if there is none.

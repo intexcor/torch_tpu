@@ -21,6 +21,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -42,7 +43,9 @@
 #include "csrc/common/cache_key.h"
 #include "csrc/common/compilation.h"
 #include "csrc/common/compilation_cache.h"
+#include "csrc/common/compile_options_key.h"
 #include "csrc/common/dimension_types.h"
+#include "csrc/common/env_vars.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/shape.h"
 #include "csrc/common/status_test_utils.h"
@@ -127,6 +130,8 @@ class NonzeroIndicesTest : public testing::Test {
  protected:
   static void SetUpTestSuite() {
     if (client_ != nullptr) return;
+
+    SetEnv<kTorchTpuInternalUseUnboundedDynamicKernelsEnvVar>("1");
 
     TT_ASSERT_OK_AND_ASSIGN(client_, PjrtBackend::GetInstance().GetClient());
     ASSERT_FALSE(client_->addressable_devices().empty());
@@ -228,25 +233,22 @@ TEST_F(NonzeroIndicesTest, ReusesExecutableAcrossShapesAndCounts) {
   }
 }
 
-// Registers the kernel in the unbounded dynamic cache under the key
-// torch.nonzero looks it up with. Lookups for any F32[M,N] input and count K
-// must then hit that entry instead of compiling, and the kernel it returns
-// must produce the correct indices.
 TEST_F(NonzeroIndicesTest, UnboundedDynamicCacheServesKernel) {
   CompilationCache& cache = CompilationCache::GetInstance();
-  UnboundedDynamicKernel nonzero = GetNonzeroUnboundedDynamicKernel();
-  const CompilationCacheKey key = nonzero.key;
-  ASSERT_TRUE(cache
-                  .AddUnboundedDynamicCacheEntry(key, nonzero.build,
-                                                 std::move(nonzero.metadata))
-                  .ok());
+  const CompilationCacheKey key = GetNonzeroUnboundedDynamicKernel().key;
 
   const std::tuple<int64_t, int64_t, int64_t> cases[] = {
       {3, 7, 5}, {17, 257, 44}, {17, 257, 4369}, {1, 16385, 1025}};
   const xla::PjRtLoadedExecutable* registered = nullptr;
   for (const auto [rows, cols, k] : cases) {
     SCOPED_TRACE(testing::Message() << rows << "x" << cols << " K=" << k);
-    const Shape input_shape({rows, cols}, mlir::ElementType::F32);
+    Shape input_shape({rows, cols}, mlir::ElementType::F32);
+    if (rows < 8) {
+      // XLA's default compact tile height shrinks below 8 when rows < 5, while
+      // `PrepareOperands` explicitly allocates `{1,0:T(8,128)}`.
+      input_shape.set_layout(
+          CustomLayout{.minor_to_major = {1, 0}, .tiles = {{8, 128}}});
+    }
     const Shape output_shape({k, 2}, mlir::ElementType::I64);
 
     const int64_t hits_before = cache.GetCacheHits();
@@ -258,11 +260,17 @@ TEST_F(NonzeroIndicesTest, UnboundedDynamicCacheServesKernel) {
             [](mlir::MLIRContext&)
                 -> absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> {
               return TT_ERROR(error::kInternal)
-                     << "nonzero must hit the unbounded dynamic cache";
+                     << "nonzero must be served by the registered kernel";
             },
             xla::CompileOptions()));
-    EXPECT_EQ(cache.GetCacheHits(), hits_before + 1);
-    EXPECT_EQ(cache.GetCacheMisses(), misses_before);
+    // The first lookup misses and builds the kernel; later ones hit it.
+    if (registered == nullptr) {
+      EXPECT_EQ(cache.GetCacheHits(), hits_before);
+      EXPECT_EQ(cache.GetCacheMisses(), misses_before + 1);
+    } else {
+      EXPECT_EQ(cache.GetCacheHits(), hits_before + 1);
+      EXPECT_EQ(cache.GetCacheMisses(), misses_before);
+    }
     TT_ASSERT_OK_AND_ASSIGN(SharedLoadedExecutableWithMetadata executable,
                             kernel.fixed_shape_kernel.get());
     ASSERT_TRUE(executable->unbounded_dynamic_execution_metadata().has_value());
@@ -284,12 +292,83 @@ TEST_F(NonzeroIndicesTest, UnboundedDynamicCacheServesKernel) {
   cache.EvictAll();
 }
 
+TEST_F(NonzeroIndicesTest, UnboundedDynamicCacheRejectsIncompatibleLayouts) {
+  CompilationCache& cache = CompilationCache::GetInstance();
+  const ShapelessKey nonzero_key =
+      GetNonzeroUnboundedDynamicKernel().key.graph_key().shapeless_key();
+
+  const Shape valid_input({17, 257}, mlir::ElementType::F32);
+  // 1. Default XLA layout for F32[3,7] is {1,0:T(4,128)}, not {1,0:T(8,128)}.
+  const Shape small_rows_input({3, 7}, mlir::ElementType::F32);
+  // 2. Transposed input layout {0,1:T(8,128)}.
+  Shape transposed_input({17, 257}, mlir::ElementType::F32);
+  transposed_input.set_layout(
+      CustomLayout{.minor_to_major = {0, 1}, .tiles = {{8, 128}}});
+  const Shape valid_output({5, 2}, mlir::ElementType::I64);
+  // 3. Output layout {1,0:T(2,128)} instead of {0,1:T(2,128)}.
+  Shape row_major_output({5, 2}, mlir::ElementType::I64);
+  row_major_output.set_layout(
+      CustomLayout{.minor_to_major = {1, 0}, .tiles = {{2, 128}}});
+
+  const std::pair<Shape, Shape> incompatible_cases[] = {
+      {small_rows_input, valid_output},
+      {transposed_input, valid_output},
+      {valid_input, row_major_output},
+  };
+
+  for (int64_t i = 0; i < std::size(incompatible_cases); ++i) {
+    const auto& [input_shape, output_shape] = incompatible_cases[i];
+    const CompilationCacheKey key(GraphKey(nonzero_key, DimensionsKey({i})),
+                                  CompileOptionsKey({}));
+    const int64_t hits_before = cache.GetCacheHits();
+    const int64_t misses_before = cache.GetCacheMisses();
+    bool builder_called = false;
+    TT_ASSERT_OK_AND_ASSIGN(
+        CompiledKernel kernel,
+        cache.GetOrCompile(
+            key, {input_shape}, {output_shape},
+            [&builder_called](mlir::MLIRContext& context)
+                -> absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> {
+              builder_called = true;
+              return mlir::ModuleOp::create(mlir::UnknownLoc::get(&context));
+            },
+            xla::CompileOptions()));
+    EXPECT_TRUE(builder_called);
+    EXPECT_FALSE(kernel.fixed_shape_kernel.get().ok());
+    EXPECT_EQ(cache.GetCacheHits(), hits_before);
+    EXPECT_EQ(cache.GetCacheMisses(), misses_before + 1);
+  }
+
+  cache.EvictAll();
+}
+
 // Logical shapes of a nonzero call, as passed to the compatibility predicate.
 struct NonzeroShapesCase {
   std::string_view name;
   std::vector<Shape> inputs;
   std::vector<Shape> outputs;
 };
+
+// The on-device layouts of the kernel's buffer contract; see nonzero_indices.h.
+xla::Layout NonzeroInputLayout() {
+  return xla::Layout({1, 0}, {xla::Tile({8, 128})});
+}
+xla::Layout NonzeroOutputLayout() {
+  return xla::Layout({0, 1}, {xla::Tile({2, 128})});
+}
+
+// Looks up the kernel registered under `key` for the shapes of `c`, with every
+// buffer in the layout of the kernel's buffer contract.
+const UnboundedDynamicKernel* FindKernelWithContractLayouts(
+    const ShapelessKey& key, const NonzeroShapesCase& c) {
+  const std::vector<xla::Layout> input_layouts(c.inputs.size(),
+                                               NonzeroInputLayout());
+  const std::vector<xla::Layout> output_layouts(c.outputs.size(),
+                                                NonzeroOutputLayout());
+  return UnboundedDynamicKernelRegistry::GetInstance()
+      .FindUnboundedDynamicKernel(key, c.inputs, input_layouts, c.outputs,
+                                  output_layouts);
+}
 
 // :kernel_registration, linked into this test, registers the kernel returned by
 // GetNonzeroUnboundedDynamicKernel() during static initialization.
@@ -318,10 +397,8 @@ TEST(NonzeroRegistrationTest, FindsKernelForCompatibleShapes) {
   };
   for (const NonzeroShapesCase& c : cases) {
     SCOPED_TRACE(c.name);
-    const UnboundedDynamicKernel* kernel =
-        UnboundedDynamicKernelRegistry::GetInstance()
-            .FindUnboundedDynamicKernel(nonzero.key.graph_key().shapeless_key(),
-                                        c.inputs, c.outputs);
+    const UnboundedDynamicKernel* kernel = FindKernelWithContractLayouts(
+        nonzero.key.graph_key().shapeless_key(), c);
     ASSERT_NE(kernel, nullptr);
     EXPECT_EQ(kernel->key, nonzero.key);
     EXPECT_EQ(kernel->build, nonzero.build);
@@ -346,9 +423,35 @@ TEST(NonzeroRegistrationTest, RejectsIncompatibleShapes) {
   };
   for (const NonzeroShapesCase& c : cases) {
     SCOPED_TRACE(c.name);
-    EXPECT_EQ(UnboundedDynamicKernelRegistry::GetInstance()
-                  .FindUnboundedDynamicKernel(nonzero_key, c.inputs, c.outputs),
-              nullptr);
+    EXPECT_EQ(FindKernelWithContractLayouts(nonzero_key, c), nullptr);
+  }
+}
+
+TEST(NonzeroRegistrationTest, RejectsIncompatibleLayouts) {
+  const ShapelessKey nonzero_key =
+      GetNonzeroUnboundedDynamicKernel().key.graph_key().shapeless_key();
+  const Shape inputs[] = {Shape({17, 257}, mlir::ElementType::F32)};
+  const Shape outputs[] = {Shape({5, 2}, mlir::ElementType::I64)};
+  struct LayoutsCase {
+    std::string_view name;
+    xla::Layout input_layout;
+    xla::Layout output_layout;
+  };
+  const LayoutsCase cases[] = {
+      {"input tiled T(4,128)", xla::Layout({1, 0}, {xla::Tile({4, 128})}),
+       NonzeroOutputLayout()},
+      {"transposed input", xla::Layout({0, 1}, {xla::Tile({8, 128})}),
+       NonzeroOutputLayout()},
+      {"row-major output", NonzeroInputLayout(),
+       xla::Layout({1, 0}, {xla::Tile({2, 128})})},
+  };
+  for (const LayoutsCase& c : cases) {
+    SCOPED_TRACE(c.name);
+    EXPECT_EQ(
+        UnboundedDynamicKernelRegistry::GetInstance()
+            .FindUnboundedDynamicKernel(nonzero_key, inputs, {c.input_layout},
+                                        outputs, {c.output_layout}),
+        nullptr);
   }
 }
 

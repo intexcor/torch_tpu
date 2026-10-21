@@ -35,6 +35,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "stablehlo/integrations/cpp/builder/AttrTypeBuilderUtil.h"
+#include "xla/layout.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
 
@@ -60,18 +61,33 @@ int64_t InputRank(absl::Span<const Shape> input_shapes) {
 }
 
 bool AcceptsRank1Input(absl::Span<const Shape> input_shapes,
-                       absl::Span<const Shape> /*output_shapes*/) {
+                       absl::Span<const xla::Layout> /*input_layouts*/,
+                       absl::Span<const Shape> /*output_shapes*/,
+                       absl::Span<const xla::Layout> /*output_layouts*/) {
   return InputRank(input_shapes) == 1;
 }
 
 bool AcceptsRank2Input(absl::Span<const Shape> input_shapes,
-                       absl::Span<const Shape> /*output_shapes*/) {
+                       absl::Span<const xla::Layout> /*input_layouts*/,
+                       absl::Span<const Shape> /*output_shapes*/,
+                       absl::Span<const xla::Layout> /*output_layouts*/) {
   return InputRank(input_shapes) == 2;
 }
 
 bool AcceptsAnyInput(absl::Span<const Shape> /*input_shapes*/,
-                     absl::Span<const Shape> /*output_shapes*/) {
+                     absl::Span<const xla::Layout> /*input_layouts*/,
+                     absl::Span<const Shape> /*output_shapes*/,
+                     absl::Span<const xla::Layout> /*output_layouts*/) {
   return true;
+}
+
+// Accepts only a row-major input layout.
+bool AcceptsRowMajorInput(absl::Span<const Shape> /*input_shapes*/,
+                          absl::Span<const xla::Layout> input_layouts,
+                          absl::Span<const Shape> /*output_shapes*/,
+                          absl::Span<const xla::Layout> /*output_layouts*/) {
+  return input_layouts.size() == 1 &&
+         input_layouts[0].minor_to_major() == absl::Span<const int64_t>({1, 0});
 }
 
 ShapelessKey DummyShapelessKey(std::string_view name) {
@@ -103,6 +119,11 @@ Shape Rank3Input() {
 }
 Shape Output() { return Shape(Dimensions({5, 2}), mlir::ElementType::I64); }
 
+// Row-major layouts, as resolved for the shapes above.
+xla::Layout Rank2Layout() { return xla::Layout({1, 0}); }
+xla::Layout Rank3Layout() { return xla::Layout({2, 1, 0}); }
+xla::Layout OutputLayout() { return xla::Layout({1, 0}); }
+
 TEST(UnboundedDynamicKernelRegistryTest,
      FindUnboundedDynamicKernelSkipsIncompatibleKernels) {
   UnboundedDynamicKernelRegistry& registry =
@@ -123,14 +144,16 @@ TEST(UnboundedDynamicKernelRegistryTest,
   // The incompatible rank-1 kernel is skipped, and the rank-2 kernel is
   // returned rather than the later, also compatible, catch-all kernel.
   const UnboundedDynamicKernel* kernel = registry.FindUnboundedDynamicKernel(
-      shapeless_key, {Rank2Input()}, {Output()});
+      shapeless_key, {Rank2Input()}, {Rank2Layout()}, {Output()},
+      {OutputLayout()});
   ASSERT_NE(kernel, nullptr);
   EXPECT_EQ(kernel->key, rank2_key);
   EXPECT_EQ(kernel->build, &BuildDummyKernel);
 
   // Only the catch-all kernel accepts a rank-3 input.
   kernel = registry.FindUnboundedDynamicKernel(shapeless_key, {Rank3Input()},
-                                               {Output()});
+                                               {Rank3Layout()}, {Output()},
+                                               {OutputLayout()});
   ASSERT_NE(kernel, nullptr);
   EXPECT_EQ(kernel->key, any_key);
 }
@@ -147,11 +170,33 @@ TEST(UnboundedDynamicKernelRegistryTest,
   // No kernel is registered under the shapeless key.
   EXPECT_EQ(registry.FindUnboundedDynamicKernel(
                 DummyShapelessKey("no_match_unregistered"), {Rank2Input()},
-                {Output()}),
+                {Rank2Layout()}, {Output()}, {OutputLayout()}),
             nullptr);
   // The only kernel under the shapeless key rejects the shapes.
   EXPECT_EQ(registry.FindUnboundedDynamicKernel(shapeless_key, {Rank2Input()},
-                                                {Output()}),
+                                                {Rank2Layout()}, {Output()},
+                                                {OutputLayout()}),
+            nullptr);
+}
+
+TEST(UnboundedDynamicKernelRegistryTest,
+     FindUnboundedDynamicKernelPassesLayoutsToPredicate) {
+  UnboundedDynamicKernelRegistry& registry =
+      UnboundedDynamicKernelRegistry::GetInstance();
+  const ShapelessKey shapeless_key = DummyShapelessKey("passes_layouts");
+  const CompilationCacheKey key = DummyKey(shapeless_key);
+  ASSERT_THAT(registry.RegisterKernel(DummyKernel(key, AcceptsRowMajorInput)),
+              IsOk());
+
+  const UnboundedDynamicKernel* kernel = registry.FindUnboundedDynamicKernel(
+      shapeless_key, {Rank2Input()}, {Rank2Layout()}, {Output()},
+      {OutputLayout()});
+  ASSERT_NE(kernel, nullptr);
+  EXPECT_EQ(kernel->key, key);
+  // Same shapes, but a column-major input layout.
+  EXPECT_EQ(registry.FindUnboundedDynamicKernel(shapeless_key, {Rank2Input()},
+                                                {xla::Layout({0, 1})},
+                                                {Output()}, {OutputLayout()}),
             nullptr);
 }
 

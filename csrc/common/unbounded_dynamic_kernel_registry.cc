@@ -27,6 +27,7 @@
 #include "csrc/common/compilation.h"
 #include "csrc/common/error_utils.h"
 #include "csrc/common/shape.h"
+#include "xla/layout.h"
 
 namespace torch_tpu {
 
@@ -52,15 +53,19 @@ absl::Status UnboundedDynamicKernelRegistry::RegisterKernel(
 const UnboundedDynamicKernel* absl_nullable
 UnboundedDynamicKernelRegistry::FindUnboundedDynamicKernel(
     const ShapelessKey& key, absl::Span<const Shape> input_shapes,
-    absl::Span<const Shape> output_shapes) const {
+    absl::Span<const xla::Layout> input_layouts,
+    absl::Span<const Shape> output_shapes,
+    absl::Span<const xla::Layout> output_layouts) const {
   const auto it = shapeless_map_.find(key);
   if (it == shapeless_map_.end()) {
     return nullptr;
   }
+
   for (const UnboundedDynamicKernel* kernel : it->second) {
     const UnboundedDynamicExecutionMetadata::CompatibilityFunc& is_compatible =
         kernel->metadata.is_compatible;
-    if (!is_compatible || is_compatible(input_shapes, output_shapes)) {
+    if (!is_compatible || is_compatible(input_shapes, input_layouts,
+                                        output_shapes, output_layouts)) {
       return kernel;
     }
   }
