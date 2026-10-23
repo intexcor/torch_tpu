@@ -36,7 +36,7 @@ class _HandshakeE2ETestMixin(metaclass=parameterized.TestGeneratorMetaclass):
   own `TpuMultiProcContinuousTest` subclass with its own worker pool.
   """
 
-  world_size = 8
+  world_size: int
   _handshake_stage: str
 
   @classmethod
