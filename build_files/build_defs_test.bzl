@@ -885,7 +885,7 @@ def _test_shard_count_clamping(env):
     env.expect.that_bool(get_tpu_chip_count_for_testing("requires-tpu-v5lite") == None).equals(True)
     env.expect.that_bool(get_tpu_chip_count_for_testing("cpu:8") == None).equals(True)
 
-    # 1. Exclusive tag in OSS clamps shard_count > 1 down to 1.
+    # 1. In OSS, exclusive clamps shard_count to 1 and becomes exclusive-if-local so it can run on RBE.
     tags_exclusive = ["exclusive", "requires-tpu-v5lite:8"]
     res_exclusive = check_and_adjust_test_tags_for_testing(
         is_oss = True,
@@ -893,6 +893,8 @@ def _test_shard_count_clamping(env):
         shard_count = 8,
     )
     env.expect.that_int(res_exclusive.shard_count).equals(1)
+    env.expect.that_collection(tags_exclusive).contains("exclusive-if-local")
+    env.expect.that_collection(tags_exclusive).not_contains("exclusive")
 
     # 2. Multi-chip tag on OSS runner without 'exclusive' clamps to runner_chips // required_chips.
     clamped_v5_8chips = clamp_shard_count_for_testing(
@@ -935,6 +937,7 @@ def _test_shard_count_clamping(env):
 # --- OSS RBE routing tests ---
 
 _V5_RBE_TAGS = ["requires-tpu"]
+_V5_4CHIP_RBE_TAGS = ["requires-tpu", "requires-tpu-v5lite:4"]
 
 # The default value of `//:_rbe_region` (OSS only).
 _DEFAULT_RBE_REGION = "us-west1"
@@ -950,6 +953,11 @@ _V5_RBE_POOLS = {
     "us-west1": "ci_tpu_v5_full_rbe",
 }
 
+_V5_4CHIP_RBE_POOLS = {
+    "us-central1": "ci_tpu_v5_4chip_central1_rbe",
+    "us-west1": "ci_tpu_v5_4chip_west1_rbe",
+}
+
 def _v5_rbe_exec_properties(pool):
     return {
         "test.Pool": pool,
@@ -957,16 +965,21 @@ def _v5_rbe_exec_properties(pool):
         "test.dockerRunAsRoot": "true",
     }
 
-# What a single-chip v5 test gets in the default region. Analysis tests that
-# expect it must pin `//:_rbe_region` to _DEFAULT_RBE_REGION, since CI passes
-# --//:_rbe_region=<region> for the region it runs in.
+# What a single-chip or 4-chip v5 test gets in the default region. Analysis
+# tests that expect it must pin `//:_rbe_region` to _DEFAULT_RBE_REGION, since
+# CI passes --//:_rbe_region=<region> for the region it runs in.
 _V5_RBE_EXEC_PROPERTIES = _v5_rbe_exec_properties(_V5_RBE_POOLS[_DEFAULT_RBE_REGION])
+_V5_4CHIP_RBE_EXEC_PROPERTIES = _v5_rbe_exec_properties(_V5_4CHIP_RBE_POOLS[_DEFAULT_RBE_REGION])
 
 _V5_RBE_ENV = {
     "TPU_ACCELERATOR_TYPE": "v5e-1",
     "TPU_SKIP_MDS_QUERY": "1",
     "TPU_WORKER_HOSTNAMES": "127.0.0.1",
     "TPU_WORKER_ID": "0",
+}
+
+_V5_4CHIP_RBE_ENV = _V5_RBE_ENV | {
+    "TPU_ACCELERATOR_TYPE": "v5e-4",
 }
 
 def _expect_no_rbe_exec_properties(env, tags, tpu_generation, region):
@@ -981,6 +994,16 @@ def _test_rbe_oss_v5_test_gets_pool(env):
         env.expect.where(region = region).that_dict(
             rbe_tpu_exec_properties_for_testing(_V5_RBE_TAGS, "v5", region),
         ).contains_exactly(_v5_rbe_exec_properties(pool))
+
+def _test_rbe_oss_v5_4chip_test_gets_pool(env):
+    """Tests that a 4-chip v5 test gets the 4-chip pool in us-west1/us-central1 and None elsewhere."""
+    for region, pool in _V5_4CHIP_RBE_POOLS.items():
+        env.expect.where(region = region).that_dict(
+            rbe_tpu_exec_properties_for_testing(_V5_4CHIP_RBE_TAGS, "v5", region),
+        ).contains_exactly(_v5_rbe_exec_properties(pool))
+    for region in _V5_RBE_POOLS:
+        if region not in _V5_4CHIP_RBE_POOLS:
+            _expect_no_rbe_exec_properties(env, _V5_4CHIP_RBE_TAGS, "v5", region)
 
 def _test_rbe_oss_network_tag_sets_docker_network(env):
     """Tests that requires-net:external adds test.dockerNetwork=standard on top of the region's pool."""
@@ -999,15 +1022,18 @@ def _test_rbe_internal_test_gets_nothing(env):
         _expect_no_rbe_exec_properties(env, _V5_RBE_TAGS, None, region)
 
 def _test_rbe_test_without_pool_gets_nothing(env):
-    """Tests that CPU, v7 and multi-chip v5 tests don't get a TPU pool, even in regions with a v5 pool."""
+    """Tests that CPU, v7, v5p-4, and 8-chip v5e tests don't get a TPU pool."""
     for tpu_generation, tags in [
         (None, []),
         # TODO: b/567928058 - Once v7x and 8-chip v5e RBE worker pools are added
-        # to _RBE_TPU_POOLS, move these two cases into positive pool tests
+        # to _RBE_TPU_POOLS, move these cases into positive pool tests
         # expecting `_V5_RBE_EXEC_PROPERTIES | {"test.Pool": "ci_tpu_v7_full_rbe"}`
         # and `_V5_RBE_EXEC_PROPERTIES | {"test.Pool": "ci_tpu_v5_8chip_full_rbe"}`.
         ("v7", ["requires-tpu-v7x", "requires-tpu"]),
         ("v5", ["requires-tpu", "requires-tpu-v5lite:8"]),
+        ("v5", ["requires-tpu", "requires-tpu-v5lite:4", "requires-tpu-v5lite:8"]),
+        # v5p, not v5e. There is no v5p RBE pool, so it must not match the 4-chip v5e pool.
+        ("v5", ["requires-tpu", "requires-tpu-v5p:4"]),
     ]:
         for region in _V5_RBE_POOLS:
             _expect_no_rbe_exec_properties(env, tags, tpu_generation, region)
@@ -1019,6 +1045,7 @@ def _test_rbe_unknown_region_gets_nothing(env):
 def _test_rbe_macro_exec_properties_impl(env, targets):
     """Verifies exec_properties, env, and shard_count emitted by torch_tpu_py_test and torch_tpu_cc_test."""
     expected_v5 = _V5_RBE_EXEC_PROPERTIES if is_oss() else {}
+    expected_v5_4chip = _V5_4CHIP_RBE_EXEC_PROPERTIES if is_oss() else {}
     expected_v5_net = (
         _V5_RBE_EXEC_PROPERTIES | {"test.dockerNetwork": "standard"}
     ) if is_oss() else {}
@@ -1033,6 +1060,10 @@ def _test_rbe_macro_exec_properties_impl(env, targets):
     env.expect.that_dict(targets.py_v5[_TagsInfo].exec_properties).contains_exactly(expected_v5)
     env.expect.that_dict(targets.py_v5[_TagsInfo].env).contains_exactly({})
     env.expect.that_int(targets.py_v5[_TagsInfo].shard_count).equals(1 if is_oss() else 8)
+
+    env.expect.that_dict(targets.py_v5_4chip[_TagsInfo].exec_properties).contains_exactly(expected_v5_4chip)
+    env.expect.that_dict(targets.py_v5_4chip[_TagsInfo].env).contains_exactly({})
+    env.expect.that_int(targets.py_v5_4chip[_TagsInfo].shard_count).equals(1 if is_oss() else 4)
 
     env.expect.that_dict(targets.py_v5_net[_TagsInfo].exec_properties).contains_exactly(expected_v5_net)
 
@@ -1067,23 +1098,26 @@ def _test_rbe_macro_exec_properties_impl(env, targets):
     if not is_oss():
         return
 
-    # Config prefix -> pool a single-chip v5 test on RBE should land in.
-    # us-west1 is the default region, so it also covers the `//conditions:default`
-    # branch of the macros' region select.
-    for prefix, pool in [
-        ("west1_", _V5_RBE_POOLS["us-west1"]),
-        ("central1_", _V5_RBE_POOLS["us-central1"]),
-        ("east1_", _V5_RBE_POOLS["us-east1"]),
-        ("asia_se1_", _V5_RBE_POOLS["asia-southeast1"]),
+    # Config prefix -> pool a single-chip or 4-chip v5 test on RBE should land
+    # in. us-west1 is the default region, so it also covers the
+    # `//conditions:default` branch of the macros' region select.
+    for prefix, region in [
+        ("west1_", "us-west1"),
+        ("central1_", "us-central1"),
+        ("east1_", "us-east1"),
+        ("asia_se1_", "asia-southeast1"),
     ]:
-        tpu = _v5_rbe_exec_properties(pool)
+        tpu = _v5_rbe_exec_properties(_V5_RBE_POOLS[region])
+        pool_4chip = _V5_4CHIP_RBE_POOLS.get(region)
+        tpu_4chip = _v5_rbe_exec_properties(pool_4chip) if pool_4chip != None else {}
         override = tpu | {"test.Pool": "custom_pool", "test.mem": "32g"}
         for k, exec_properties, test_env, shard_count in [
             ("py_v5", tpu, _V5_RBE_ENV, 8),
+            ("py_v5_4chip", tpu_4chip, _V5_4CHIP_RBE_ENV, 1),
             ("py_v5_net", tpu | {"test.dockerNetwork": "standard"}, _V5_RBE_ENV, None),
             ("py_override", override, _V5_RBE_ENV | caller_env, None),
             ("py_cpu", {}, {}, None),
-            ("py_multichip", {}, {}, 8),
+            ("py_multichip", {}, {}, 1),
             ("py_v7", {}, {}, None),
             ("cc_v5", tpu, _V5_RBE_ENV, 4),
             ("cc_override", override, _V5_RBE_ENV | caller_env, None),
@@ -1109,6 +1143,12 @@ def _test_rbe_macro_exec_properties(name):
         name = name + "_py_v5",
         tags = ["exclusive", "requires-tpu-v5lite"],
         shard_count = 8,
+        **common_py_kwargs
+    )
+    torch_tpu_py_test(
+        name = name + "_py_v5_4chip",
+        tags = ["exclusive", "requires-tpu-v5lite:4"],
+        shard_count = 4,
         **common_py_kwargs
     )
     torch_tpu_py_test(
@@ -1160,6 +1200,7 @@ def _test_rbe_macro_exec_properties(name):
     )
     subject_names = [
         "py_v5",
+        "py_v5_4chip",
         "py_v5_net",
         "py_override",
         "py_cpu",
@@ -1258,6 +1299,7 @@ def build_defs_test_suite(name):
             _test_oss_presubmit_tpu_generation_implicit_v6,
             _test_rbe_internal_test_gets_nothing,
             _test_rbe_oss_network_tag_sets_docker_network,
+            _test_rbe_oss_v5_4chip_test_gets_pool,
             _test_rbe_oss_v5_test_gets_pool,
             _test_rbe_test_without_pool_gets_nothing,
             _test_rbe_unknown_region_gets_nothing,

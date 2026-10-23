@@ -624,6 +624,12 @@ def _check_and_adjust_test_tags(
             if not tpu_generation:
                 fail("TPU tests failing on all generations in OSS should use notest_oss instead.")
 
+    # Bazel forces exclusive tests to run locally; exclusive-if-local lets them run on RBE.
+    if is_oss and "exclusive" in tags:
+        tags.remove("exclusive")
+        if "exclusive-if-local" not in tags:
+            tags.append("exclusive-if-local")
+
     process_accelerator_tags(tags)
     _sort_inplace(tags)
 
@@ -803,7 +809,7 @@ def torch_tpu_cc_test(
         shard_count = raw_shard_count,
     )
     if result.shard_count != None:
-        kwargs["shard_count"] = select_rbe_shard_count(raw_shard_count, result.shard_count)
+        kwargs["shard_count"] = select_rbe_shard_count(raw_shard_count, result.shard_count, effective_tags)
 
     if requires_libtpu == None:
         # requires-tpu is a generic tag automatically applied whenever at least
@@ -1346,7 +1352,7 @@ def torch_tpu_py_test(
 
         target_kwargs = dict(kwargs)
         if result.shard_count != None:
-            target_kwargs["shard_count"] = select_rbe_shard_count(raw_shard_count, result.shard_count)
+            target_kwargs["shard_count"] = select_rbe_shard_count(raw_shard_count, result.shard_count, target_tags)
         target_kwargs["env"] = test_env
         add_rbe_exec_properties(target_kwargs, target_tags, result.tpu_generation)
 
