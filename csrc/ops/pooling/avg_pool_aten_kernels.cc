@@ -215,11 +215,12 @@ absl::StatusOr<mlir::MlirOp> BuildAvgPoolShlo(
     Dimensions stride, Dimensions padding, bool ceil_mode,
     bool count_include_pad, std::optional<int64_t> divisor_override) {
   const mlir::ElementType orig_dtype = GetElementTypeOrDie(input);
-  if (spatial_dim_count == k3dSpatialDimCount) {
-    TT_ASSIGN_OR_RETURN(const mlir::ElementType compute_dtype,
-                        InferComputationDtype(orig_dtype));
-    TT_ASSIGN_OR_RETURN(input, CastIfNeeded(input, compute_dtype));
-  }
+  // Accumulate the window sums in PyTorch's computation dtype (F32 for
+  // bfloat16/float16), matching ATen's `acc_type` on CUDA. Summing directly in
+  // a 16-bit float loses precision as the window grows.
+  TT_ASSIGN_OR_RETURN(const mlir::ElementType compute_dtype,
+                      InferComputationDtype(orig_dtype));
+  TT_ASSIGN_OR_RETURN(input, CastIfNeeded(input, compute_dtype));
   auto& builder = input.getBuilder();
 
   // 1. Create a batch input by normalizing the input tensor
@@ -287,10 +288,7 @@ absl::StatusOr<mlir::MlirOp> BuildAvgPoolShlo(
 
   auto result =
       RemoveTrivialBatch(final_output, original_dim_size, spatial_dim_count);
-  if (spatial_dim_count == k3dSpatialDimCount) {
-    return CastIfNeeded(result, orig_dtype);
-  }
-  return result;
+  return CastIfNeeded(result, orig_dtype);
 }
 
 // Mathematically, average pooling is a linear transformation that can be
@@ -385,12 +383,11 @@ absl::StatusOr<mlir::MlirOp> BuildAvgPoolBackwardShlo(
     const Dimensions& padding, bool ceil_mode, bool count_include_pad,
     std::optional<int64_t> divisor_override) {
   const mlir::ElementType orig_dtype = GetElementTypeOrDie(grad_output);
-  if (spatial_dim_count == k3dSpatialDimCount) {
-    TT_ASSIGN_OR_RETURN(const mlir::ElementType compute_dtype,
-                        InferComputationDtype(orig_dtype));
-    TT_ASSIGN_OR_RETURN(grad_output, CastIfNeeded(grad_output, compute_dtype));
-    TT_ASSIGN_OR_RETURN(input, CastIfNeeded(input, compute_dtype));
-  }
+  // Accumulate in PyTorch's computation dtype; see BuildAvgPoolShlo.
+  TT_ASSIGN_OR_RETURN(const mlir::ElementType compute_dtype,
+                      InferComputationDtype(orig_dtype));
+  TT_ASSIGN_OR_RETURN(grad_output, CastIfNeeded(grad_output, compute_dtype));
+  TT_ASSIGN_OR_RETURN(input, CastIfNeeded(input, compute_dtype));
   auto& builder = grad_output.getBuilder();
 
   // 1. Create batch inputs for both input and grad_output
@@ -489,10 +486,7 @@ absl::StatusOr<mlir::MlirOp> BuildAvgPoolBackwardShlo(
 
   auto result = RemoveTrivialBatch(
       sliced_grad, batch_input_info.original_dim_size, spatial_dim_count);
-  if (spatial_dim_count == k3dSpatialDimCount) {
-    return CastIfNeeded(result, orig_dtype);
-  }
-  return result;
+  return CastIfNeeded(result, orig_dtype);
 }
 
 auto GetAvgPoolOpBuilder(at::IntArrayRef kernel_size, at::IntArrayRef stride,
