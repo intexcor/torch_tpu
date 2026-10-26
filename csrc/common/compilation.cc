@@ -560,9 +560,9 @@ absl::Status ApplyCompilerOptionOverrides(
       // different order will yield different keys, but it is an acceptable
       // trade-off.
       // LINT.IfChange(xla_flags_fingerprint)
-      Fingerprint(GetEnvOnce<kXlaFlagsEnvVar>().value_or("")),
+      Fingerprint(ExpandAndGetXlaFlagsEnvVarOnce().value_or("")),
       // LINT.ThenChange()
-      Fingerprint(GetEnvOnce<kLibtpuInitArgsEnvVar>().value_or("")),
+      Fingerprint(ExpandAndGetLibtpuInitArgsEnvVarOnce().value_or("")),
       Fingerprint(options)));
 }
 // LINT.ThenChange()

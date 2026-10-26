@@ -53,8 +53,8 @@ void AssignMegascalePorts(const int local_rank) {
   ABSL_LOG(INFO) << "Multi-slice job detected, setting " << kMegascalePortEnvVar
                  << "=" << megascale_port << " and "
                  << kMegascaleDebugPortEnvVar << "=" << megascale_debug_port;
-  SetEnv<kMegascalePortEnvVar>(absl::StrCat(megascale_port));
-  SetEnv<kMegascaleDebugPortEnvVar>(absl::StrCat(megascale_debug_port));
+  SafeSetEnv<kMegascalePortEnvVar>(absl::StrCat(megascale_port));
+  SafeSetEnv<kMegascaleDebugPortEnvVar>(absl::StrCat(megascale_debug_port));
 }
 
 // Keeps libtpu from wrapping the TPU PJRT client in a MegaScale client, which a
@@ -65,7 +65,7 @@ void AssignMegascalePorts(const int local_rank) {
 void SkipMegascaleClient() {
   ABSL_LOG(INFO) << "Single-slice job detected, setting "
                  << kSkipMegascalePjrtClientEnvVar << "=true";
-  SetEnv<kSkipMegascalePjrtClientEnvVar>("true");
+  SafeSetEnv<kSkipMegascalePjrtClientEnvVar>("true");
 }
 
 // Returns true if `flags` sets the boolean libtpu flag `flag_name` in any
@@ -201,33 +201,37 @@ absl::Status InitializeDistributedEnvironment(
   }
   std::vector<std::string> addresses = absl::StrSplit(config.sb_addrs, ',');
   const int slice_rank = config.rank % static_cast<int>(addresses.size());
-  SetEnv<kCloudTpuTaskIdEnvVar>(absl::StrCat(slice_rank));
+  SafeSetEnv<kCloudTpuTaskIdEnvVar>(absl::StrCat(slice_rank));
 
   // TPU_VISIBLE_DEVICES is our source of truth for device visibility.
   // Because libtpu prioritizes TPU_VISIBLE_CHIPS over TPU_VISIBLE_DEVICES when
   // non-empty, we explicitly overwrite TPU_VISIBLE_CHIPS to match
   // TPU_VISIBLE_DEVICES so that external settings do not override device
   // selection.
-  const auto& visible_devices_env = GetEnvOnce<kTpuVisibleDevicesEnvVar>();
-  const std::string target_dev = (visible_devices_env.has_value() &&
-                                  IsSingleDeviceSpecified(*visible_devices_env))
-                                     ? *visible_devices_env
+  // Read with std::getenv() rather than GetEnvOnce<>(), since the env var is
+  // set below.
+  const char* const visible_devices_env =
+      std::getenv(  // GETENV_OK=the env var is set below.
+          kTpuVisibleDevicesEnvVar);
+  const std::string target_dev = (visible_devices_env != nullptr &&
+                                  IsSingleDeviceSpecified(visible_devices_env))
+                                     ? visible_devices_env
                                      : absl::StrCat(config.local_rank);
-  SetEnv<kTpuVisibleDevicesEnvVar>(target_dev);
-  SetEnv<kTpuVisibleChipsEnvVar>(target_dev);
+  SafeSetEnv<kTpuVisibleDevicesEnvVar>(target_dev);
+  SafeSetEnv<kTpuVisibleChipsEnvVar>(target_dev);
 
   const std::vector<std::string> topology_dims =
       absl::StrSplit(config.topology, ',');
   const std::string chips_bounds =
       (topology_dims.size() == 4) ? "1,1,1,1" : "1,1,1";
 
-  SetEnv<kTpuHostBoundsEnvVar>(config.topology);
-  SetEnv<kTpuChipsPerHostBoundsEnvVar>(chips_bounds);
-  SetEnv<kTpuProcessBoundsEnvVar>(config.topology);
-  SetEnv<kTpuChipsPerProcessBoundsEnvVar>(chips_bounds);
+  SafeSetEnv<kTpuHostBoundsEnvVar>(config.topology);
+  SafeSetEnv<kTpuChipsPerHostBoundsEnvVar>(chips_bounds);
+  SafeSetEnv<kTpuProcessBoundsEnvVar>(config.topology);
+  SafeSetEnv<kTpuChipsPerProcessBoundsEnvVar>(chips_bounds);
 
   // The free slicebuilder port of this process.
-  SetEnv<kTpuProcessPortEnvVar>(config.sb_port);
+  SafeSetEnv<kTpuProcessPortEnvVar>(config.sb_port);
 
   // `addresses` lists the processes of one slice, so a larger world spans
   // several slices, which libtpu connects over MegaScale (DCN).
@@ -238,14 +242,19 @@ absl::Status InitializeDistributedEnvironment(
   }
 
   // The addresses of all other workers in the slice.
-  SetEnv<kTpuProcessAddressesEnvVar>(absl::StrJoin(addresses, ","));
+  SafeSetEnv<kTpuProcessAddressesEnvVar>(absl::StrJoin(addresses, ","));
 
   // Avoid multi-process libtpu lock in GCP init, see b/487769788.
-  SetEnv<kAllowMultipleLibtpuLoadEnvVar>("1");
+  SafeSetEnv<kAllowMultipleLibtpuLoadEnvVar>("1");
 
-  const std::string libtpu_init_args_str =
-      ConfigureLibtpuInitArgs(GetEnvOnce<kLibtpuInitArgsEnvVar>().value_or(""));
-  SetEnv<kLibtpuInitArgsEnvVar>(libtpu_init_args_str);
+  // Read with std::getenv() rather than GetEnvOnce<>(), since the env var is
+  // set below.
+  const char* const libtpu_init_args =
+      std::getenv(  // GETENV_OK=the env var is set below.
+          kLibtpuInitArgsEnvVar);
+  const std::string libtpu_init_args_str = ConfigureLibtpuInitArgs(
+      libtpu_init_args != nullptr ? libtpu_init_args : "");
+  SafeSetEnv<kLibtpuInitArgsEnvVar>(libtpu_init_args_str);
   return absl::OkStatus();
 }
 
@@ -255,13 +264,17 @@ absl::Status InitializeSingleDeviceEnvironment() {
   // non-empty, we explicitly overwrite TPU_VISIBLE_CHIPS to match
   // TPU_VISIBLE_DEVICES so that external settings do not override device
   // selection.
-  const auto& visible_devices_env = GetEnvOnce<kTpuVisibleDevicesEnvVar>();
-  const std::string target_dev = (visible_devices_env.has_value() &&
-                                  IsSingleDeviceSpecified(*visible_devices_env))
-                                     ? *visible_devices_env
+  // Read with std::getenv() rather than GetEnvOnce<>(), since the env var is
+  // set below.
+  const char* const visible_devices_env =
+      std::getenv(  // GETENV_OK=the env var is set below.
+          kTpuVisibleDevicesEnvVar);
+  const std::string target_dev = (visible_devices_env != nullptr &&
+                                  IsSingleDeviceSpecified(visible_devices_env))
+                                     ? visible_devices_env
                                      : "0";
-  SetEnv<kTpuVisibleDevicesEnvVar>(target_dev);
-  SetEnv<kTpuVisibleChipsEnvVar>(target_dev);
+  SafeSetEnv<kTpuVisibleDevicesEnvVar>(target_dev);
+  SafeSetEnv<kTpuVisibleChipsEnvVar>(target_dev);
   return absl::OkStatus();
 }
 
