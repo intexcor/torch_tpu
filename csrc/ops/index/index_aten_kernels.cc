@@ -23,6 +23,7 @@
 
 #include "ATen/core/ATen_fwd.h"
 #include "ATen/core/TensorBody.h"
+#include "ATen/ops/count_nonzero.h"
 #include "absl/functional/bind_front.h"
 #include "absl/log/absl_log.h"
 #include "absl/status/statusor.h"
@@ -67,13 +68,20 @@ struct IndicesInfo {
   std::optional<int64_t> num_non_zero_elements;
 };
 
-// Computes the number of non-zero (`True`) elements in `mask` on TPU via
-// `BuildNonzeroGetOutputSizeShlo` and materializes the scalar count on CPU.
-// This count is required ahead of time to determine the data-dependent output
-// shape of boolean mask indexing.
+// Computes the number of non-zero (`True`) elements in `mask`. This count is
+// required ahead of time to determine the data-dependent output shape of
+// boolean mask indexing.
+//
+// A CPU `mask` is counted on the host with `at::count_nonzero`, which only runs
+// the CPU kernel and never dispatches a TPU op. A TPU `mask` is counted on TPU
+// via `BuildNonzeroGetOutputSizeShlo` and the scalar count is materialized on
+// CPU.
 absl::StatusOr<int64_t> GetNumNonZeroElements(const at::Tensor& mask) {
   if (mask.numel() == 0) {
     return 0;
+  }
+  if (mask.is_cpu()) {
+    return at::count_nonzero(mask).item<int64_t>();
   }
   TT_ASSIGN_OR_RETURN(at::Tensor num_non_zero_elements,
                       UnaryOp(mask,
@@ -86,13 +94,19 @@ absl::StatusOr<int64_t> GetNumNonZeroElements(const at::Tensor& mask) {
   return num_non_zero_elements.cpu().item<int64_t>();
 }
 
-// Preprocess and check the `indices_list_opt` input into `IndicesInfo`.
-absl::StatusOr<IndicesInfo> ValidateAndGetIndicesInfo(
+// Checks that `indices_list_opt` fits the shape of `self` (number of indices,
+// boolean mask shapes, at most one boolean mask) and converts it into
+// `IndicesInfo`, with all index tensors moved to the device of `self`.
+// Per-tensor dtype and device checks are done by
+// `ValidateIndexDtypesAndDevices`.
+absl::StatusOr<IndicesInfo> ValidateShapesAndGetIndicesInfo(
     const at::Tensor& self,
     const c10::List<c10::optional<at::Tensor>>& indices_list_opt) {
   IndicesInfo info;
   int64_t dim_indexed = 0;
   bool has_bool_mask = false;
+
+  TT_RETURN_IF_ERROR(ValidateIndexDtypesAndDevices(self, indices_list_opt));
 
   for (int64_t i = 0; i < indices_list_opt.size(); ++i) {
     const auto& tensor = indices_list_opt[i];
@@ -134,9 +148,13 @@ absl::StatusOr<IndicesInfo> ValidateAndGetIndicesInfo(
       // `op_builder` lowering (`BuildBooleanMaskIndexShlo`).
       // An M-D mask consumes M dimensions of `self` (a 0D mask consumes 0
       // dimensions and inserts a new dimension at `dim_indexed`).
+      // The count is computed before moving a CPU mask to TPU so that it can
+      // be done on the host.
       TT_ASSIGN_OR_RETURN(info.num_non_zero_elements,
                           GetNumNonZeroElements(index_tensor));
-      info.indices.push_back(index_tensor);
+      TT_ASSIGN_OR_RETURN(at::Tensor tpu_mask,
+                          MoveIndexToDevice(index_tensor, self.device()));
+      info.indices.push_back(std::move(tpu_mask));
       info.dimensions.push_back(dim_indexed);
       dim_indexed += index_tensor.dim();
     } else {
@@ -145,7 +163,9 @@ absl::StatusOr<IndicesInfo> ValidateAndGetIndicesInfo(
           << "indexing with more than one bool tensor is not yet supported";
       TT_RET_CHECK(dim_indexed < self.dim(), error::kIndexError)
           << "too many indices for tensor of dimension " << self.dim();
-      info.indices.push_back(index_tensor);
+      TT_ASSIGN_OR_RETURN(at::Tensor tpu_index,
+                          MoveIndexToDevice(index_tensor, self.device()));
+      info.indices.push_back(std::move(tpu_index));
       info.dimensions.push_back(dim_indexed++);
     }
   }
@@ -153,9 +173,11 @@ absl::StatusOr<IndicesInfo> ValidateAndGetIndicesInfo(
   TT_RET_CHECK(!info.indices.empty(), error::kInvalidArgument)
       << "expected at least one index tensor to be defined, got 0";
 
-  // Negative-index resolution copies indices to CPU for bounds validation and
-  // wrapping. For boolean masks, indices are generated on-device by
-  // `BuildNonzeroShlo` and are guaranteed to be non-negative `[0, dim_size)`.
+  // Negative integer indices are wrapped on TPU by adding the size of the
+  // indexed dimension (no bounds checking is done; see
+  // `ResolveNegativeIndices`). This is skipped for boolean masks, whose
+  // positions are generated on-device by `BuildNonzeroShlo` and are guaranteed
+  // to be non-negative `[0, dim_size)`.
   if (!has_bool_mask) {
     TT_RETURN_IF_ERROR(
         ResolveNegativeIndices(info.indices, self.sizes(), info.dimensions));
@@ -244,8 +266,8 @@ at::Tensor& AtenIndexTensorOut(
                         "This is being tracked by the dimensions variable"),
        out),
       {
-        TT_ASSIGN_OR_THROW(IndicesInfo info,
-                           ValidateAndGetIndicesInfo(self, indices_list_opt));
+        TT_ASSIGN_OR_THROW(IndicesInfo info, ValidateShapesAndGetIndicesInfo(
+                                                 self, indices_list_opt));
 
         TT_ASSIGN_OR_THROW(Dimensions output_dims, GetOutputDims(self, info));
         // The indices_list_opt gets ignored in the cache key, but we still

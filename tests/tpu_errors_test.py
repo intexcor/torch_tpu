@@ -358,6 +358,37 @@ class TpuOnlyErrorTest(et.TpuOnlyErrorTestBase):
       )
       t.to("cpu")
 
+  @parameterized.parameters("cpu", "tpu")
+  @et.why_tpu_only(
+      "PyTorch still accepts uint8 indices as a deprecated mask, while TorchTPU"
+      " rejects them like masked_fill, masked_select and masked_scatter."
+  )
+  def test_index_uint8_indices(self, index_device):
+    """Tests that index() rejects uint8 index tensors."""
+    x = torch.zeros(4, 3, device="tpu")
+    index = torch.tensor([1, 0, 1, 1], dtype=torch.uint8, device=index_device)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""index(): expected index tensors to have dtype bool, int32, or int64, got uint8 at index 0; indexing with uint8 tensors is deprecated in PyTorch and not supported in TorchTPU, use bool tensors instead""",
+    ):
+      x[index].to("cpu")
+
+  @parameterized.parameters("cpu", "tpu")
+  @et.why_tpu_only(
+      "PyTorch still accepts uint8 indices as a deprecated mask, while TorchTPU"
+      " rejects them like masked_fill, masked_select and masked_scatter."
+  )
+  def test_index_put_uint8_indices(self, index_device):
+    """Tests that index_put_() rejects uint8 index tensors."""
+    x = torch.zeros(4, 3, device="tpu")
+    index = torch.tensor([1, 0, 1, 1], dtype=torch.uint8, device=index_device)
+    with et.assert_raises_message(
+        RuntimeError,
+        tpu="""index_put_(): expected index tensors to have dtype bool, int32, or int64, got uint8 at index 0; indexing with uint8 tensors is deprecated in PyTorch and not supported in TorchTPU, use bool tensors instead""",
+    ):
+      x.index_put_([index], torch.ones(3, 3, device="tpu"))
+      x.to("cpu")
+
   @et.why_tpu_only("The behavior is undefined on CPU.")
   def test_index_put_with_assign_buffer_to_at_tensor_failure(self):
     """Tests that index_put() bubbles up the error from AssignBufferToAtTensor.

@@ -2805,7 +2805,7 @@ Device-side assertion tracking was not enabled by user.""",
     with et.assert_raises_message(
         err_type,
         gpu="""tensors used as indices must be long, int, byte or bool tensors""",
-        tpu="""index_put_(): expected index tensors to have dtype bool, byte, int32, or int64, got float32 at index 0""",
+        tpu="""index_put_(): expected index tensors to have dtype bool, int32, or int64, got float32 at index 0""",
     ):
       torch.index_put_(
           torch.tensor([0, 1], device=et.device()),
@@ -8019,9 +8019,9 @@ Supported combinations for non-constant padding:
   def test_index_too_many_indices(self):
     t = torch.ones(2, 2, device=et.device())
     indices = [
-        torch.ones(2, device=et.device()),
-        torch.ones(2, device=et.device()),
-        torch.ones(2, device=et.device()),
+        torch.ones(2, dtype=torch.long, device=et.device()),
+        torch.ones(2, dtype=torch.long, device=et.device()),
+        torch.ones(2, dtype=torch.long, device=et.device()),
     ]
 
     # Call the out overload.

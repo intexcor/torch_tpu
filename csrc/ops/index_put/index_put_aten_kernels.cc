@@ -22,6 +22,7 @@
 #include "ATen/ExpandUtils.h"
 #include "ATen/core/ATen_fwd.h"
 #include "ATen/core/TensorBody.h"
+#include "ATen/ops/nonzero.h"
 #include "ATen/ops/permute.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/log/absl_check.h"
@@ -31,6 +32,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
+#include "c10/core/Device.h"
 #include "csrc/common/cache_key.h"
 #include "csrc/common/dimension_types.h"
 #include "csrc/common/dtype.h"
@@ -53,28 +55,17 @@ namespace torch_tpu {
 
 namespace {
 
-absl::Status ValidateIndicesType(
-    const c10::List<std::optional<at::Tensor>>& indices_list_opt) {
-  for (int64_t i = 0; i < indices_list_opt.size(); ++i) {
-    auto maybe_tensor = indices_list_opt[i];
-    if (!maybe_tensor.has_value() || !maybe_tensor.value().defined()) {
-      // tensor is not defined when it is None. This happens in case of
-      // slicing for example: self[indices, :, indices] = bar. In this case
-      // the second index tensor will be undefined.
-      continue;
-    }
-    const auto& index_tensor = maybe_tensor.value();
-
-    TT_RET_CHECK(index_tensor.scalar_type() == c10::ScalarType::Int ||
-                     index_tensor.scalar_type() == c10::ScalarType::Long ||
-                     index_tensor.scalar_type() == c10::ScalarType::Byte ||
-                     index_tensor.scalar_type() == c10::ScalarType::Bool,
-                 error::kInvalidArgument)
-        << "expected index tensors to have dtype bool, byte, int32, or int64, "
-           "got "
-        << ToString(index_tensor.scalar_type()) << " at index " << i;
+// Returns the positions of the non-zero elements of `mask` on `device`, with
+// shape (L, mask.dim()). A CPU `mask` is evaluated on the host, which avoids a
+// TPU nonzero and its device-to-host sync for the data-dependent output size.
+// Calling `at::nonzero` on a CPU `mask` is fine here since it only runs the CPU
+// kernel and never dispatches a TPU op.
+absl::StatusOr<at::Tensor> GetNonzeroPositionsOnDevice(
+    const at::Tensor& mask, const c10::Device& device) {
+  if (mask.is_cpu()) {
+    return MoveIndexToDevice(at::nonzero(mask), device);
   }
-  return absl::OkStatus();
+  return AtenNonzero(mask);
 }
 
 // Preprocesses indices tensor list by converting boolean tensor masks into
@@ -98,8 +89,9 @@ absl::Status ValidateIndicesType(
 //   - Shape Validation: The shape of the boolean tensor must exactly match the
 //     sizes of the corresponding dimensions {i, ..., i+k-1} in 'self'.
 //     E.g., index_tensor.shape == (self.size(i), ..., self.size(i+k-1)).
-//   - NonZero Conversion: `AtenNonzero()` is called, yielding a
-//     tensor of shape (L, k), where L is the number of True elements.
+//   - NonZero Conversion: `AtenNonzero()` (or `at::nonzero()` on the host for a
+//     CPU mask) is called, yielding a tensor of shape (L, k), where L is the
+//     number of True elements.
 //   - Decomposition: This (L, k) tensor is split into k column vectors. The
 //   j-th
 //     column (0 <= j < k) becomes a 1D integer tensor of shape (L,) and is
@@ -135,8 +127,9 @@ absl::StatusOr<std::vector<at::Tensor>> ConvertBooleanIndicesToPositional(
         self_dim++;
       }
 
-      at::Tensor nonzero_result =
-          AtenNonzero(index_tensor);  // Shape (L, mask_ndim)
+      TT_ASSIGN_OR_RETURN(
+          at::Tensor nonzero_result,  // Shape (L, mask_ndim)
+          GetNonzeroPositionsOnDevice(index_tensor, self.device()));
       // Decompose the columns of the non-zero result, with each column becoming
       // a separate 1D integer tensor.
       for (int64_t i = 0; i < index_tensor.dim(); ++i) {
@@ -147,7 +140,9 @@ absl::StatusOr<std::vector<at::Tensor>> ConvertBooleanIndicesToPositional(
         indexed_dims.push_back(dim_indexed++);
       }
     } else {
-      index_tensors.push_back(index_tensor);
+      TT_ASSIGN_OR_RETURN(at::Tensor tpu_index,
+                          MoveIndexToDevice(index_tensor, self.device()));
+      index_tensors.push_back(std::move(tpu_index));
       indexed_dims.push_back(dim_indexed++);
     }
   }
@@ -500,7 +495,7 @@ absl::Status IndexPutHelper(
       << ToString(values.scalar_type()) << " and "
       << ToString(self.scalar_type());
 
-  TT_RETURN_IF_ERROR(ValidateIndicesType(indices_list_opt));
+  TT_RETURN_IF_ERROR(ValidateIndexDtypesAndDevices(self, indices_list_opt));
 
   const auto mask_info = GetSingleBooleanMaskInfo(indices_list_opt);
   if (mask_info.has_value() &&
@@ -513,9 +508,12 @@ absl::Status IndexPutHelper(
     //
     // self[mask] = broadcastable_value
     //
-    return IndexPutWithBooleanMask(
-        self, indices_list_opt[mask_info->index_start_dim].value(),
-        mask_info->index_start_dim, values, accumulate, out);
+    TT_ASSIGN_OR_RETURN(
+        at::Tensor mask,
+        MoveIndexToDevice(indices_list_opt[mask_info->index_start_dim].value(),
+                          self.device()));
+    return IndexPutWithBooleanMask(self, mask, mask_info->index_start_dim,
+                                   values, accumulate, out);
   }
   return IndexPut(self, indices_list_opt, values, accumulate, out);
 }
