@@ -150,6 +150,8 @@ torch_tpu_cc_library(
         ":dtype",
         ":index_arg",
         ":scalar",
+        ":shape",
+        ":tile",
         "@com_google_absl//absl/functional:function_ref",
         "@com_google_absl//absl/log:absl_check",
         "@llvm-project//llvm:Support",

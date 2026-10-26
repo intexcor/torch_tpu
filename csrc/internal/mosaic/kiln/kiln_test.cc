@@ -36,6 +36,7 @@
 #include "csrc/common/error_utils.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "xla/hlo/testlib/filecheck.h"
 
@@ -978,6 +979,67 @@ TEST(KilnTest, ForLoopWithInductionVarAndBounds) {
     CHECK:             tpu.vector_store %[[OUT]]
     CHECK:           }
     CHECK:         }
+  )"));
+}
+
+TEST(KilnTest, ForLoopWithCarriedState) {
+  absl::StatusOr<Kernel> kernel = CreateKernel(
+      GridSpec{.name = "for_carry", .grid = {1}}, InSpec{f32(8, 128)},
+      OutSpec{f32(8, 128)}, [](Ref in, Ref out) {
+        // Carry a scalar and a tile through four iterations.
+        const StateVector final_state =
+            For(0, 4, 1, {I32(1), Tile(in)},
+                [&](Scalar, llvm::ArrayRef<StateValue> state) -> StateVector {
+                  return {std::get<Scalar>(state[0]) + 2,
+                          std::get<Tile>(state[1]) + Tile(in)};
+                });
+        out = std::get<Tile>(final_state[1]) *
+              std::get<Scalar>(final_state[0]).ToF32();
+      });
+  EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
+    CHECK-LABEL: func.func @for_carry(
+    CHECK:         %[[ONE:.*]] = arith.constant 1 : i32
+    CHECK:         %[[IN:.*]] = vector.load
+    CHECK:         %[[RES:.*]]:2 = scf.for %{{.*}} = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[S:.*]] = %[[ONE]], %[[T:.*]] = %[[IN]]) -> (i32, vector<8x128xf32>) {
+    CHECK:           %[[S2:.*]] = arith.addi %[[S]], %{{.*}} : i32
+    CHECK:           %[[T2:.*]] = arith.addf %[[T]], %{{.*}} : vector<8x128xf32>
+    CHECK:           scf.yield %[[S2]], %[[T2]] : i32, vector<8x128xf32>
+    CHECK:         }
+    CHECK:         arith.sitofp %[[RES]]#0 : i32 to f32
+    CHECK:         arith.mulf %[[RES]]#1, %{{.*}} : vector<8x128xf32>
+  )"));
+}
+
+// An i32 -> u32 swap keeps the MLIR type, so only Kiln can catch it.
+TEST(KilnTest, ForLoopRejectsChangedStateDtype) {
+  absl::StatusOr<Kernel> kernel = CreateKernel(
+      GridSpec{.name = "for_carry_dtype", .grid = {1}}, InSpec{f32(8, 128)},
+      OutSpec{f32(8, 128)}, [](Ref, Ref) {
+        EXPECT_DEATH(
+            For(0, 4, 1, {I32(0)},
+                [](Scalar i, llvm::ArrayRef<StateValue>) -> StateVector {
+                  return {i.AsType(u32)};
+                }),
+            "For\\(\\) state value 0 changed dtype: expected i32, got u32");
+      });
+  ASSERT_THAT(kernel, IsOk());
+}
+
+TEST(KilnTest, ForLoopWithEmptyState) {
+  absl::StatusOr<Kernel> kernel = CreateKernel(
+      GridSpec{.name = "for_empty_carry", .grid = {1}}, InSpec{f32(8, 128)},
+      OutSpec{f32(8, 128)}, [](Ref in, Ref out) {
+        EXPECT_TRUE(For(0, 4, 1, {},
+                        [&](Scalar, llvm::ArrayRef<StateValue>) -> StateVector {
+                          out = Tile(in);
+                          return {};
+                        })
+                        .empty());
+      });
+  EXPECT_THAT(kernel, IsOkAndMatchesIr(R"(
+    CHECK:     scf.for
+    CHECK:       tpu.vector_store {{.*}}
+    CHECK-NEXT:  }
   )"));
 }
 

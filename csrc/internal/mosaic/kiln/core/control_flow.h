@@ -17,11 +17,20 @@
 #ifndef TORCH_TPU_CSRC_INTERNAL_MOSAIC_KILN_CORE_CONTROL_FLOW_H_
 #define TORCH_TPU_CSRC_INTERNAL_MOSAIC_KILN_CORE_CONTROL_FLOW_H_
 
+#include <variant>
+
 #include "absl/functional/function_ref.h"
 #include "csrc/internal/mosaic/kiln/core/index_arg.h"
 #include "csrc/internal/mosaic/kiln/core/scalar.h"
+#include "csrc/internal/mosaic/kiln/core/tile.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace torch_tpu::kiln {
+
+// A value carried from one loop iteration to the next.
+using StateValue = std::variant<Scalar, Tile>;
+using StateVector = llvm::SmallVector<StateValue, 4>;
 
 // Structured control flow inside a kernel body.
 //
@@ -44,6 +53,16 @@ inline void For(IndexArg lower, IndexArg upper,
 inline void For(IndexArg upper, absl::FunctionRef<void(Scalar)> body) {
   For(0, upper, 1, body);
 }
+
+// Counted loop with loop-carried SSA state (`scf.for` with `iter_args`, the
+// carry of `lax.fori_loop`). `body` receives the signed i32 induction variable
+// and the current state, and returns the next state, which must match
+// `init_state` in count, kind (`Scalar` vs. `Tile`), dtype and shape. Returns
+// the state after the last iteration.
+StateVector For(
+    IndexArg lower, IndexArg upper, IndexArg step,
+    llvm::ArrayRef<StateValue> init_state,
+    absl::FunctionRef<StateVector(Scalar, llvm::ArrayRef<StateValue>)> body);
 
 // Executes `body` synchronously inside a `tpu.region` (Pallas `pl.run_scoped`)
 // before `RunScoped` returns.

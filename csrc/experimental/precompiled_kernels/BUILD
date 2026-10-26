@@ -86,6 +86,7 @@ torch_tpu_cc_library(
         "//csrc/common:unbounded_dynamic_kernel_registry",
         "//csrc/internal/mosaic/kiln",
         "//csrc/ops:op_names",
+        "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
