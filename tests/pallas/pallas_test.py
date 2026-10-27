@@ -27,6 +27,7 @@ from absl.testing import absltest
 import jax
 from jax.experimental import pallas as pl
 import jax.numpy as jnp
+import numpy as np
 from packaging import version
 import torch
 import torch._library.custom_ops as torch_custom_ops
@@ -35,6 +36,7 @@ from torch_tpu._internal import compile as tpu_compile
 from torch_tpu._internal import execution_mode
 from torch_tpu._internal import pallas
 from torch_tpu._internal import testing as tt_testing
+from torch_tpu._internal.ops import splash_attention
 from torch_tpu._internal.pallas import _compat
 from torch_tpu._internal.utils import test_utils
 from torch_tpu._internal.utils import utils
@@ -1816,6 +1818,183 @@ class TestPallasMesh(seed_test_utils.RepeatableTest):
         "Use torch.tpu.pallas.get_pallas_mesh instead.",
         str(deprecations[0].message),
     )
+
+
+class TestSplashAttention(seed_test_utils.RepeatableTest):
+
+  def _assert_host_numpy_mask_info(self, mask_info):
+    self.assertIsNotNone(mask_info)
+    for field in (
+        mask_info.data_next,
+        mask_info.mask_next,
+        mask_info.block_mask,
+        mask_info.partial_mask_blocks,
+        mask_info.q_sequence,
+    ):
+      if field is not None:
+        self.assertIsInstance(field, np.ndarray)
+        self.assertNotIsInstance(field, jax.Array)
+
+  def test_make_splash_attention_fn_uses_host_numpy_masks(self):
+    """Mask creation stays on host NumPy without eager JAX TPU staging."""
+    kernel_lib = splash_attention.splash_attention_kernel
+    mask_lib = splash_attention.splash_attention_mask
+    block_sizes = kernel_lib.BlockSizes(
+        block_q=128,
+        block_kv=128,
+        block_kv_compute=128,
+        block_q_dkv=128,
+        block_kv_dkv=128,
+        block_kv_dkv_compute=128,
+        block_q_dq=128,
+        block_kv_dq=128,
+        use_fused_bwd_kernel=False,
+    )
+    local_mask = mask_lib.MultiHeadMask(
+        masks=(
+            mask_lib.LocalMask(shape=(256, 256), window_size=(64, 0), offset=0),
+        )
+        * 4
+    )
+    # Create a dense mask with mixed True/False tiles so partial_mask_blocks
+    # is populated and downcast to int8 on host.
+    q_idx = np.arange(256)[:, None]
+    kv_idx = np.arange(256)[None, :]
+    dense_bool = (q_idx >= kv_idx) & ((q_idx - kv_idx) <= 48)
+    numpy_mask = mask_lib.MultiHeadMask(
+        masks=(mask_lib.NumpyMask(dense_bool),) * 4
+    )
+
+    with mock.patch.object(
+        jnp,
+        "array",
+        side_effect=AssertionError("eager jnp.array should not run"),
+    ):
+      fwd_info, dq_info, dkv_info, mask_fn = (
+          splash_attention._make_numpy_splash_mask_infos(
+              local_mask, block_sizes
+          )
+      )
+      self.assertIsNotNone(mask_fn)
+      self._assert_host_numpy_mask_info(fwd_info)
+      self._assert_host_numpy_mask_info(dq_info)
+      self._assert_host_numpy_mask_info(dkv_info)
+
+      np_fwd, np_dq, np_dkv, np_mask_fn = (
+          splash_attention._make_numpy_splash_mask_infos(
+              numpy_mask, block_sizes
+          )
+      )
+      self.assertIsNone(np_mask_fn)
+      self._assert_host_numpy_mask_info(np_fwd)
+      self._assert_host_numpy_mask_info(np_dq)
+      self._assert_host_numpy_mask_info(np_dkv)
+      self.assertIsNotNone(np_fwd.partial_mask_blocks)
+      self.assertEqual(np_fwd.partial_mask_blocks.dtype, np.int8)
+
+      for kwargs in (
+          dict(
+              seq_len=256,
+              n_heads=4,
+              n_kv_heads=4,
+              local_window_size=64,
+              use_fused_bwd_kernel=False,
+              block_q=128,
+              block_kv=128,
+              block_kv_compute=128,
+              block_q_dkv=128,
+              block_kv_dkv=128,
+              block_kv_dkv_compute=128,
+              block_q_dq=128,
+              block_kv_dq=128,
+          ),
+          dict(
+              seq_len=256,
+              n_heads=4,
+              n_kv_heads=1,
+              is_causal=True,
+              use_fused_bwd_kernel=True,
+              block_q=128,
+              block_kv=128,
+              block_kv_compute=128,
+              block_q_dkv=128,
+              block_kv_dkv=128,
+              block_kv_dkv_compute=128,
+          ),
+          dict(
+              seq_len=256,
+              n_heads=4,
+              n_kv_heads=4,
+              is_causal=False,
+              use_fused_bwd_kernel=True,
+              block_q=128,
+              block_kv=128,
+              block_kv_compute=128,
+              block_q_dkv=128,
+              block_kv_dkv=128,
+              block_kv_dkv_compute=128,
+          ),
+      ):
+        fwd_fn, bwd_fn = splash_attention._make_splash_attention_fn(**kwargs)
+        self.assertTrue(callable(fwd_fn))
+        self.assertTrue(callable(bwd_fn))
+
+  def test_splash_sdpa_concurrent_with_async_tpu_ops(self):
+    """Uncached splash_sdpa fwd+bwd succeeds alongside async PyTorch TPU ops."""
+    bsz, n_heads, seq_len, head_dim = 2, 4, 256, 128
+    window_size = 64
+
+    q_cpu = torch.randn(bsz, n_heads, seq_len, head_dim, dtype=torch.float32)
+    k_cpu = torch.randn(bsz, n_heads, seq_len, head_dim, dtype=torch.float32)
+    v_cpu = torch.randn(bsz, n_heads, seq_len, head_dim, dtype=torch.float32)
+
+    q_ref = q_cpu.clone().requires_grad_(True)
+    k_ref = k_cpu.clone().requires_grad_(True)
+    v_ref = v_cpu.clone().requires_grad_(True)
+    idx = torch.arange(seq_len)
+    attn_mask = (idx[:, None] >= idx[None, :]) & (
+        (idx[:, None] - idx[None, :]) <= window_size
+    )
+    out_ref = torch.nn.functional.scaled_dot_product_attention(
+        q_ref, k_ref, v_ref, attn_mask=attn_mask
+    )
+    out_ref.sum().backward()
+
+    q_tpu = q_cpu.to("tpu").detach().requires_grad_(True)
+    k_tpu = k_cpu.to("tpu").detach().requires_grad_(True)
+    v_tpu = v_cpu.to("tpu").detach().requires_grad_(True)
+
+    # Enqueue unsynchronized PyTorch TPU ops immediately before uncached
+    # splash_sdpa lowering + jax.export runs.
+    bg = torch.ones((512, 512), dtype=torch.float32, device="tpu")
+    for _ in range(8):
+      bg = bg + 1.0
+
+    out_tpu = torch.tpu.ops.splash_sdpa(
+        q_tpu,
+        k_tpu,
+        v_tpu,
+        is_causal=True,
+        local_window_size=window_size,
+        block_q=128,
+        block_kv=128,
+        block_dkv=128,
+        block_kv_compute=128,
+        block_q_dkv=128,
+        block_kv_dkv=128,
+        block_kv_dkv_compute=128,
+        use_fused_bwd_kernel=False,
+    )
+    out_tpu.sum().backward()
+
+    test_utils.assert_close(bg.cpu(), torch.full((512, 512), 9.0))
+    test_utils.assert_close(out_tpu.cpu(), out_ref, rtol=1e-2, atol=1e-2)
+    self.assertIsNotNone(q_tpu.grad)
+    self.assertIsNotNone(k_tpu.grad)
+    self.assertIsNotNone(v_tpu.grad)
+    test_utils.assert_close(q_tpu.grad.cpu(), q_ref.grad, rtol=1e-2, atol=1e-2)
+    test_utils.assert_close(k_tpu.grad.cpu(), k_ref.grad, rtol=1e-2, atol=1e-2)
+    test_utils.assert_close(v_tpu.grad.cpu(), v_ref.grad, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":

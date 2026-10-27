@@ -18,6 +18,7 @@ Wraps JAX's splash_attention_kernel for use with PyTorch tensors on TPU.
 Uses torch_tpu._internal.pallas.custom_jax_kernel() to bridge JAX -> PyTorch.
 """
 
+from collections.abc import Callable
 import hashlib
 import math
 import sys
@@ -29,8 +30,12 @@ from absl import logging
 import jax
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+from jax.experimental.pallas.ops.tpu.splash_attention import (
+    splash_attention_mask_info,
+)
 from jax.experimental.pallas.ops.tpu.splash_attention.splash_attention_kernel import QKVLayout
 import jax.numpy as jnp
+import numpy as np
 import torch
 # torch_tpu Pallas bridge
 from torch_tpu._internal import pallas as _pallas
@@ -64,6 +69,96 @@ def _default_block_size(
     if limit % size == 0:
       return size
   return _MIN_BLOCK_SIZE
+
+
+def _to_numpy_mask_info(
+    mask_info: splash_attention_mask_info.MaskInfo,
+) -> splash_attention_mask_info.MaskInfo:
+  """Normalizes MaskInfo arrays on host without placing buffers on TPU."""
+  if mask_info.partial_mask_blocks is not None and isinstance(
+      mask_info.partial_mask_blocks, np.ndarray
+  ):
+    mask_info = mask_info._replace(
+        partial_mask_blocks=mask_info.partial_mask_blocks.astype(np.int8)
+    )
+  return mask_info
+
+
+def _make_numpy_splash_mask_infos(
+    mask: splash_attention_mask.MultiHeadMask,
+    block_sizes: splash_attention_kernel.BlockSizes,
+) -> tuple[
+    splash_attention_mask_info.MaskInfo,
+    splash_attention_mask_info.MaskInfo | None,
+    splash_attention_mask_info.MaskInfo | None,
+    Callable[..., typing.Any] | None,
+]:
+  """Builds forward and backward MaskInfo as host NumPy arrays.
+
+  Avoids splash_attention_kernel.make_splash_{mha,mqa}, which eagerly call
+  jnp.array(...) outside a JAX trace and stage mask buffers onto TPU via JAX's
+  PJRT client while TorchTPU's C++ PJRT client may be executing on TPU.
+
+  Args:
+    mask: Multi-head attention mask specification.
+    block_sizes: Tile sizes for forward and backward splash kernels.
+
+  Returns:
+    Tuple of (fwd_mask_info, dq_mask_info, dkv_mask_info, mask_function).
+
+  Raises:
+    ValueError: If required backward block sizes are missing or mask functions
+      are inconsistent across forward and backward passes.
+  """
+  fwd_mask_info, mask_function_fwd = splash_attention_mask_info.process_mask(
+      mask,
+      (block_sizes.block_q, block_sizes.block_kv),
+      downcast_smem_data=True,
+      head_shards=1,
+      q_seq_shards=1,
+  )
+  fwd_mask_info = _to_numpy_mask_info(fwd_mask_info)
+
+  dq_mask_info = None
+  dkv_mask_info = None
+  if block_sizes.has_backward_blocks:
+    if not block_sizes.use_fused_bwd_kernel:
+      if block_sizes.block_q_dq is None or block_sizes.block_kv_dq is None:
+        raise ValueError(
+            "block_q_dq and block_kv_dq are required when "
+            "use_fused_bwd_kernel is False."
+        )
+      dq_mask_info, mask_function_dq = splash_attention_mask_info.process_mask(
+          mask,
+          (block_sizes.block_q_dq, block_sizes.block_kv_dq),
+          downcast_smem_data=True,
+          head_shards=1,
+          q_seq_shards=1,
+      )
+      if (mask_function_fwd is None) != (mask_function_dq is None):
+        raise ValueError("Inconsistent forward and dQ mask functions.")
+      dq_mask_info = _to_numpy_mask_info(dq_mask_info)
+
+    if block_sizes.block_q_dkv is None or block_sizes.block_kv_dkv is None:
+      raise ValueError(
+          "block_q_dkv and block_kv_dkv are required when "
+          "has_backward_blocks is True."
+      )
+    dkv_mask_info, mask_function_dkv = (
+        splash_attention_mask_info.process_mask_dkv(
+            mask,
+            (block_sizes.block_q_dkv, block_sizes.block_kv_dkv),
+            downcast_smem_data=True,
+            head_shards=1,
+            q_seq_shards=1,
+            shrink_grid=not block_sizes.use_fused_bwd_kernel,
+        )
+    )
+    if (mask_function_fwd is None) != (mask_function_dkv is None):
+      raise ValueError("Inconsistent forward and dKV mask functions.")
+    dkv_mask_info = _to_numpy_mask_info(dkv_mask_info)
+
+  return fwd_mask_info, dq_mask_info, dkv_mask_info, mask_function_fwd
 
 
 def _make_splash_attention_fn(
@@ -172,33 +267,15 @@ def _make_splash_attention_fn(
 
   is_mqa = n_kv_heads == 1
 
-  if is_mqa:
-    splash_kernel = splash_attention_kernel.make_splash_mqa(
-        mask=multi_head_mask,
-        head_shards=1,
-        q_seq_shards=1,
-        block_sizes=block_sizes,
-    )
-  else:
-    splash_kernel = splash_attention_kernel.make_splash_mha(
-        mask=multi_head_mask,
-        head_shards=1,
-        q_seq_shards=1,
-        block_sizes=block_sizes,
-    )
-
-  # Static mask infos and kernel kwargs from creation time.
-  # These are the same for every forward/backward call with the same config.
-  fwd_mask_info = splash_kernel.fwd_mask_info
-  dq_mask_info = splash_kernel.dq_mask_info
-  dkv_mask_info = splash_kernel.dkv_mask_info
-  _mask_value = splash_kernel.kwargs.get("mask_value", _DEFAULT_MASK_VALUE)
-  _mask_function = splash_kernel.kwargs.get("mask_function", None)
-  _attn_logits_soft_cap = splash_kernel.kwargs.get("attn_logits_soft_cap", None)
-  _residual_checkpoint_name = splash_kernel.kwargs.get(
-      "residual_checkpoint_name", None
+  # Keep static mask infos as host NumPy arrays so jax.export embeds them
+  # directly as MLIR constants without eager JAX TPU buffer staging.
+  fwd_mask_info, dq_mask_info, dkv_mask_info, _mask_function = (
+      _make_numpy_splash_mask_infos(multi_head_mask, block_sizes)
   )
-  _interpret = splash_kernel.kwargs.get("interpret", False)
+  _mask_value = _DEFAULT_MASK_VALUE
+  _attn_logits_soft_cap = None
+  _residual_checkpoint_name = None
+  _interpret = False
 
   def _single_fwd_with_lse(q_b, k_b, v_b, seg_b):
     """Forward for one batch element; returns (out_b, logsumexp_b)."""
