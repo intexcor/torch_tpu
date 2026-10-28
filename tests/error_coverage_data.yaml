@@ -27,7 +27,7 @@ csrc/common/environment.cc: {infeasible: 0, remaining: 2, total: 2}
 csrc/common/error_utils.cc: {infeasible: 1, remaining: 5, total: 9}
 csrc/common/error_utils.h: {infeasible: 0, remaining: 3, total: 3}
 csrc/common/excess_precision.cc: {infeasible: 0, remaining: 0, total: 1}
-csrc/common/layout_utils.cc: {infeasible: 0, remaining: 0, total: 2}
+csrc/common/layout_utils.cc: {infeasible: 1, remaining: 0, total: 2}
 csrc/common/libtpu_version.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/common/static_shape_check.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/common/tier2_compilation_cache.cc: {infeasible: 0, remaining: 3, total: 3}
@@ -46,7 +46,7 @@ csrc/eager/events_queue.cc: {infeasible: 1, remaining: 1, total: 3}
 csrc/eager/execution_task.cc: {infeasible: 1, remaining: 11, total: 12}
 csrc/eager/host_allocator.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/eager/materialize.cc: {infeasible: 2, remaining: 2, total: 6}
-csrc/eager/op_dispatcher.cc: {infeasible: 1, remaining: 0, total: 1}
+csrc/eager/op_dispatcher.cc: {infeasible: 1, remaining: 0, total: 2}
 csrc/eager/op_dispatcher.h: {infeasible: 0, remaining: 0, total: 1}
 csrc/eager/tensor_to_buffer.cc: {infeasible: 2, remaining: 6, total: 11}
 csrc/eager/tpu_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 3}
