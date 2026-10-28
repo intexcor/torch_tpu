@@ -655,6 +655,11 @@ _GCS_WEIGHTS_PREFIX = flags.DEFINE_string(
     "Prefix within the GCS bucket where weights and configs are stored.",
 )
 
+# Per-request HTTP timeout for GCS downloads, so an unreachable GCS endpoint
+# fails fast and falls back instead of stalling the caller on the library's
+# default 60s timeout.
+_GCS_DOWNLOAD_TIMEOUT_SECONDS = 15
+
 
 def _download_gcs_blob(
     bucket_name: str,
@@ -680,7 +685,9 @@ def _download_gcs_blob(
     client = storage.Client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
-    blob.download_to_filename(str(temp_dest))
+    blob.download_to_filename(
+        str(temp_dest), timeout=_GCS_DOWNLOAD_TIMEOUT_SECONDS
+    )
     temp_dest.replace(dest_path)
     logging.info(
         "Successfully downloaded gs://%s/%s to %s",

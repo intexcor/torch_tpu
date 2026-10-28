@@ -913,7 +913,8 @@ class ModuleRegistryTest(seed_test_utils.RepeatableTest):
       mock_bucket.blob.return_value = mock_blob
       mock_blob.exists.return_value = True
 
-      def fake_download(filename):
+      def fake_download(filename, timeout=None):
+        del timeout  # Unused.
         pathlib.Path(filename).write_bytes(b'{"model_type": "bert"}')
 
       mock_blob.download_to_filename.side_effect = fake_download
@@ -930,6 +931,9 @@ class ModuleRegistryTest(seed_test_utils.RepeatableTest):
       mock_client.bucket.assert_called_once_with("torchtpu-test")
       mock_bucket.blob.assert_called_once_with(
           "weights/transformers/test/config.json"
+      )
+      mock_blob.download_to_filename.assert_called_once_with(
+          mock.ANY, timeout=module_registry._GCS_DOWNLOAD_TIMEOUT_SECONDS
       )
 
   def test_download_gcs_blob_not_found(self):
