@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 from collections.abc import Callable
+import copy
 from typing import Any
 from absl.testing import absltest
 import torch
@@ -450,6 +451,104 @@ class GraphTransformationsTest(seed_test_utils.RepeatableTest):
         lambda seq_len: torch.ones(2, seq_len, 8)[:, 1:3, 2:6],
         [torch.ops.aten.slice.Tensor, torch.ops.aten.slice.Tensor],
     )
+
+  def test_handle_dynamic_input_tensor_pass_per_tensor_dtype(self):
+    """Emits pad_real_to_static for <8B dtypes and set_dimension_logical_size for 64/128b dtypes without adding guards."""
+    captured_gm = None
+    guards_before = None
+    guards_after = None
+
+    def fw_compiler(graph_module, example_inputs):
+      nonlocal captured_gm, guards_before, guards_after
+      shape_env = next(
+          inp.node.shape_env
+          for inp in example_inputs
+          if isinstance(inp, torch.SymInt)
+      )
+      cloned_gm = torch.fx.GraphModule(
+          graph_module, copy.deepcopy(graph_module.graph)
+      )
+      bm = sym_bounds_manager.SymBoundsManager(example_inputs)
+      ctx = graph_transform_context.GraphTransformContext(
+          cloned_gm, example_inputs, bm.get_fallback_symbol_bounds()
+      )
+      placeholders = list(
+          cloned_gm.graph.find_nodes(op="placeholder", sort=True)
+      )
+
+      guards_before = len(shape_env.guards)
+      graph_transformations.ScanInputsCreatePlaceholdersPass(ctx, placeholders)(
+          cloned_gm
+      )
+      graph_transformations.HandleDynamicInputTensorPass(ctx, placeholders)(
+          cloned_gm
+      )
+      guards_after = len(shape_env.guards)
+      captured_gm = cloned_gm
+      return graph_module
+
+    @torch.compile(backend=aot_autograd(fw_compiler=fw_compiler))
+    def f(ids, f64_x, kv, hidden, u8_x, complex_x, complex128_x):
+      return (
+          ids.unsqueeze(-1).to(hidden.dtype) + hidden + u8_x.to(hidden.dtype),
+          f64_x + 1.0,
+          kv + 1.0,
+          complex_x + 1.0,
+          complex128_x + 1.0,
+      )
+
+    ids = torch.ones((2, 6), dtype=torch.int64)
+    f64_x = torch.ones((2, 6), dtype=torch.float64)
+    kv = torch.ones((2, 10, 8), dtype=torch.bfloat16)
+    hidden = torch.ones((2, 6, 8), dtype=torch.float32)
+    u8_x = torch.ones((2, 6, 8), dtype=torch.uint8)
+    complex_x = torch.ones((2, 6), dtype=torch.complex64)
+    complex128_x = torch.ones((2, 6), dtype=torch.complex128)
+    torch._dynamo.mark_dynamic(ids, 1, min=2, max=16)
+    torch._dynamo.mark_dynamic(f64_x, 1, min=2, max=16)
+    torch._dynamo.mark_dynamic(kv, 1, min=4, max=32)
+    torch._dynamo.mark_dynamic(hidden, 1, min=2, max=16)
+    torch._dynamo.mark_dynamic(u8_x, 1, min=2, max=16)
+    torch._dynamo.mark_dynamic(complex_x, 1, min=2, max=16)
+    torch._dynamo.mark_dynamic(complex128_x, 1, min=2, max=16)
+
+    f(ids, f64_x, kv, hidden, u8_x, complex_x, complex128_x)
+
+    self.assertIsNotNone(captured_gm)
+    self.assertEqual(guards_before, guards_after)
+
+    pad_nodes = list(
+        captured_gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.tpu._pad_real_to_static,
+        )
+    )
+    set_dim_nodes = list(
+        captured_gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.tpu._set_dimension_logical_size,
+        )
+    )
+    self.assertLen(pad_nodes, 3)
+    self.assertLen(set_dim_nodes, 4)
+
+    pad_dtypes = {node.args[0].meta["val"].dtype for node in pad_nodes}
+    set_dim_dtypes = {node.args[0].meta["val"].dtype for node in set_dim_nodes}
+    self.assertEqual(pad_dtypes, {torch.uint8, torch.bfloat16, torch.float32})
+    self.assertEqual(
+        set_dim_dtypes,
+        {torch.int64, torch.float64, torch.complex64, torch.complex128},
+    )
+
+    # Shared sequence-length symbol reuses the same runtime size placeholder
+    # across set_dimension_logical_size (ids/complex_x) and pad_real_to_static (hidden).
+    hidden_pad = next(
+        n for n in pad_nodes if n.args[0].meta["val"].dtype == torch.float32
+    )
+    ids_set_dim = next(
+        n for n in set_dim_nodes if n.args[0].meta["val"].dtype == torch.int64
+    )
+    self.assertEqual(hidden_pad.args[1][1], ids_set_dim.args[2])
 
 
 if __name__ == "__main__":
