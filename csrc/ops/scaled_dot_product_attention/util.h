@@ -79,24 +79,20 @@ kiln::Tile LoadBias(kiln::Ref bias_ref, const FlashAttnConfig& config,
 bool NeedsPadMask(const FlashAttnConfig& config, const Tiling& tiling);
 
 // True when the (row_block, col_block) tile pair touches or lies below the
-// diagonal (and within `config.sliding_window_size` when set), i.e. the tile
-// contributes to a causal softmax.
+// diagonal, i.e. the tile contributes to a causal softmax.
 kiln::Scalar BelowOrOnDiagonal(kiln::Scalar row_block, kiln::Scalar col_block,
-                               const FlashAttnConfig& config,
                                const Tiling& tiling);
 
 // True when the (row_block, col_block) tile contains at least one element
-// strictly above the diagonal (or outside `config.sliding_window_size` when
-// set), i.e. whether a causal mask needs to be applied to it. Tiles strictly
-// inside the valid region need no masking.
+// strictly above the diagonal, i.e. whether a causal mask needs to be applied
+// to it. Tiles strictly below the diagonal need no masking.
 kiln::Scalar IntersectsDiagonal(kiln::Scalar row_block, kiln::Scalar col_block,
-                                const FlashAttnConfig& config,
                                 const Tiling& tiling);
 
-// Masks out logits above the diagonal (causal), outside the sliding window, and
-// in the padded tail of either sequence for the sub-block starting at
-// (row_offset, col_offset) within the (row_block, col_block) grid tile. Returns
-// `s` untouched when no masking is required.
+// Masks out logits above the diagonal (causal) and in the padded tail of
+// either sequence for the sub-block starting at (row_offset, col_offset)
+// within the (row_block, col_block) grid tile. Returns `s` untouched when no
+// masking is required.
 kiln::Tile ApplyStructuredMask(kiln::Tile s, kiln::Scalar row_block,
                                kiln::Scalar col_block,
                                const FlashAttnConfig& config,

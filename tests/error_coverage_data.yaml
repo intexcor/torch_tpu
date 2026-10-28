@@ -220,7 +220,7 @@ csrc/ops/roll/roll_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/ops/round/round.cc: {infeasible: 1, remaining: 0, total: 1}
 csrc/ops/round/round_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 2}
 csrc/ops/scaled_dot_product_attention/flash_attention_kernel.cc: {infeasible: 0, remaining: 1, total: 1}
-csrc/ops/scaled_dot_product_attention/flash_attention_kernel_builder.cc: {infeasible: 0, remaining: 3, total: 4}
+csrc/ops/scaled_dot_product_attention/flash_attention_kernel_builder.cc: {infeasible: 0, remaining: 3, total: 3}
 csrc/ops/scaled_dot_product_attention/scaled_dot_product_attention_aten_kernels.cc: {infeasible: 0, remaining: 0, total: 1}
 csrc/ops/scaled_dot_product_attention/scaled_dot_product_attention_shlo.cc: {infeasible: 0, remaining: 0, total: 5}
 csrc/ops/scaled_dot_product_attention/util.cc: {infeasible: 3, remaining: 0, total: 3}

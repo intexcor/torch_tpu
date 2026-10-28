@@ -1664,25 +1664,6 @@ Please use clone() or contiguous() to copy the tensor before writing""",
           query, key, value, attn_bias=attn_bias
       )[0].cpu()
 
-  @et.why_tpu_only(
-      "1D attn_mask for sliding window is a TPU-specific implementation."
-  )
-  def test_scaled_dot_product_attention_empty_1d_attn_mask(self):
-    def make_tensor():
-      # seq_len > 256 is the smallest shape that dispatches to FlashAttention.
-      return torch.empty(1, 1, 257, 8, device=et.device())
-
-    q, k, v = make_tensor(), make_tensor(), make_tensor()
-    attn_mask = torch.empty(0, dtype=torch.bool, device=et.device())
-
-    with et.assert_raises_message(
-        RuntimeError,
-        tpu="""scaled_dot_product_cudnn_attention(): expected sliding_window_size to be positive, got 0""",
-    ):
-      torch.nn.functional.scaled_dot_product_attention(
-          q, k, v, attn_mask=attn_mask
-      ).cpu()
-
   @et.why_tpu_only("Bounded dynamism is a TPU-specific feature.")
   def test_mark_dynamic_multiple_dimensions_failure(self):
     inp = torch.ones(10, 10, device=et.device(), dtype=torch.float32)

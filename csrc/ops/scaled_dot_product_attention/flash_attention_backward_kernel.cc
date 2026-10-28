@@ -240,7 +240,7 @@ absl::StatusOr<kiln::Kernel> CreateBackwardDkvKernel(
                      });
 
             if (config.is_causal) {
-              kiln::If(BelowOrOnDiagonal(qi, ki, config, tiling),
+              kiln::If(BelowOrOnDiagonal(qi, ki, tiling),
                        [&] {  // REF_CAPTURE_OK=called synchronously
                          EmitDkvStep(config, tiling, seed_ref, q_ref, k_ref,
                                      v_ref, do_ref, lse_ref, di_ref, bias_ref,
@@ -321,7 +321,7 @@ absl::StatusOr<kiln::Kernel> CreateBackwardDqKernel(
                      });
 
             if (config.is_causal) {
-              kiln::If(BelowOrOnDiagonal(qi, ki, config, tiling),
+              kiln::If(BelowOrOnDiagonal(qi, ki, tiling),
                        [&] {  // REF_CAPTURE_OK=called synchronously
                          EmitDqStep(config, tiling, seed_ref, q_ref, k_ref,
                                     v_ref, do_ref, lse_ref, di_ref, bias_ref,

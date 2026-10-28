@@ -46,20 +46,6 @@ T Fmix32(T h) {
   return h.AsType(kiln::i32);
 }
 
-kiln::Scalar BelowOrOnDiagonal(kiln::Scalar row_block, kiln::Scalar col_block,
-                               int64_t qt, int64_t kt,
-                               std::optional<int64_t> sliding_window_size) {
-  kiln::Scalar cond = (row_block + 1) * qt - 1 >= col_block * kt;
-  if (!sliding_window_size.has_value()) {
-    return cond;
-  }
-  // Keep only tiles whose top-right corner `(first_row, last_col)` is within
-  // the sliding window (`first_row - last_col < sliding_window_size`).
-  kiln::Scalar first_row = row_block * qt;
-  kiln::Scalar last_col = (col_block + 1) * kt - 1;
-  return cond & ((first_row - last_col) < *sliding_window_size);
-}
-
 }  // namespace
 
 absl::Status ValidateFlashAttnConfig(const FlashAttnConfig& config,
@@ -95,14 +81,11 @@ kiln::IndexMap KvBlockIndexMap(const FlashAttnConfig& config,
                                const Tiling& tiling) {
   const int64_t head_group = config.num_heads / config.kv_num_heads;
   return kiln::IndexMap([head_group, is_causal = config.is_causal,
-                         sliding_window_size = config.sliding_window_size,
-                         qt = tiling.qt,
-                         kt = tiling.kt]() -> kiln::IndexIndices {
+                         tiling]() -> kiln::IndexIndices {
     kiln::Scalar kv_head = kiln::ProgramId(1) / head_group;
     kiln::Scalar kv_block = kiln::ProgramId(3);
     if (is_causal) {
-      kv_block = Select(BelowOrOnDiagonal(kiln::ProgramId(2), kv_block, qt, kt,
-                                          sliding_window_size),
+      kv_block = Select(BelowOrOnDiagonal(kiln::ProgramId(2), kv_block, tiling),
                         kv_block, 0);
     }
     return {kiln::ProgramId(0), kv_head, kv_block, 0};
@@ -153,24 +136,13 @@ bool NeedsPadMask(const FlashAttnConfig& config, const Tiling& tiling) {
 }
 
 kiln::Scalar BelowOrOnDiagonal(kiln::Scalar row_block, kiln::Scalar col_block,
-                               const FlashAttnConfig& config, const Tiling& t) {
-  return BelowOrOnDiagonal(row_block, col_block, t.qt, t.kt,
-                           config.sliding_window_size);
+                               const Tiling& t) {
+  return (row_block + 1) * t.qt - 1 >= col_block * t.kt;
 }
 
 kiln::Scalar IntersectsDiagonal(kiln::Scalar row_block, kiln::Scalar col_block,
-                                const FlashAttnConfig& config,
                                 const Tiling& t) {
-  kiln::Scalar cond = (col_block + 1) * t.kt - 1 > row_block * t.qt;
-  if (!config.sliding_window_size.has_value()) {
-    return cond;
-  }
-  // Also apply element-wise masking when the tile straddles the lower boundary
-  // of the sliding window (its bottom-left corner `(last_row, first_col)` has
-  // `last_row - first_col >= sliding_window_size`).
-  kiln::Scalar last_row = (row_block + 1) * t.qt - 1;
-  kiln::Scalar first_col = col_block * t.kt;
-  return cond | ((last_row - first_col) >= *config.sliding_window_size);
+  return (col_block + 1) * t.kt - 1 > row_block * t.qt;
 }
 
 kiln::Tile ApplyStructuredMask(kiln::Tile s, kiln::Scalar row_block,
@@ -202,9 +174,6 @@ kiln::Tile ApplyStructuredMask(kiln::Tile s, kiln::Scalar row_block,
   };
   if (config.is_causal) {
     also(row >= col);
-    if (config.sliding_window_size.has_value()) {
-      also((row - col) < *config.sliding_window_size);
-    }
   }
   if (ragged_q) {
     also(row < config.q_sequence_length);

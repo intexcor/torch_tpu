@@ -39,7 +39,7 @@ absl::StatusOr<std::tuple<at::Tensor, at::Tensor, at::Tensor>>
 CreateFlashAttentionBackwardKernel(
     const at::Tensor& grad_out, const at::Tensor& query, const at::Tensor& key,
     const at::Tensor& value, const at::Tensor& out, const at::Tensor& logsumexp,
-    std::optional<at::Tensor> attn_bias, std::optional<double> scale,
+    const std::optional<at::Tensor>& attn_bias, std::optional<double> scale,
     bool is_causal, double dropout_p = 0.0,
     const std::optional<at::Tensor>& philox_seed = std::nullopt,
     const std::optional<at::Tensor>& philox_offset = std::nullopt);

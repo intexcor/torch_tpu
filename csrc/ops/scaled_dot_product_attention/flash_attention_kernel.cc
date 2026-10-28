@@ -129,7 +129,7 @@ SoftmaxState UpdateSoftmaxState(const FlashAttnConfig& config,
   }
 
   kiln::Tile mij = kiln::MaxReduce(s, 1).Lanes(kLanes);
-  if (args.bias_ref || config.sliding_window_size.has_value()) {
+  if (args.bias_ref) {
     // Clamping mij instead of sij ensures that when a row is entirely masked
     // out with -inf, sij - mij evaluates to (-inf) - (<large negative finite>)
     // = -inf, so exp2(-inf) = 0.0 naturally without any vector compare or
@@ -216,8 +216,7 @@ void EmitGridStep(const FlashAttnConfig& config, const Tiling& tiling,
   const int64_t qt = tiling.qt;
   const int64_t kt = tiling.kt;
   const int64_t kc = tiling.kc;
-  const bool square_causal_diag_block = intersects_causal_diag && qt == kt &&
-                                        !config.sliding_window_size.has_value();
+  const bool square_causal_diag_block = intersects_causal_diag && qt == kt;
   const int64_t band_rows = square_causal_diag_block ? kc : qt;
   const int64_t num_bands = qt / band_rows;
 
@@ -314,54 +313,39 @@ absl::StatusOr<kiln::Kernel> CreateKernel(const FlashAttnConfig& config,
                 .ki = kiln::ProgramId(3),
             };
 
-            auto emit_causal_step = [&] {  // REF_CAPTURE_OK=called locally
+            if (config.is_causal) {
               kiln::If(
-                  IntersectsDiagonal(args.qi, args.ki, config,
-                                     normalized_tiling),
+                  BelowOrOnDiagonal(args.qi, args.ki, normalized_tiling),
                   [&] {  // REF_CAPTURE_OK=called synchronously
-                    EmitGridStep(config, normalized_tiling, args,
-                                 single_kv_step, has_padding,
-                                 /*intersects_causal_diag=*/true);
-                  },
-                  [&] {  // REF_CAPTURE_OK=called synchronously
-                    EmitGridStep(config, normalized_tiling, args,
-                                 single_kv_step, has_padding,
-                                 /*intersects_causal_diag=*/false);
-                  });
-            };
-
-            if (config.is_causal && !config.sliding_window_size.has_value()) {
-              kiln::If(BelowOrOnDiagonal(args.qi, args.ki, config,
-                                         normalized_tiling),
-                       [&] {  // REF_CAPTURE_OK=called synchronously
-                         if (!single_kv_step) {
-                           kiln::If(
-                               args.ki == 0,
+                    if (!single_kv_step) {
+                      kiln::If(args.ki == 0,
                                [&] {  // REF_CAPTURE_OK=called synchronously
                                  InitSoftmaxScratch(config, normalized_tiling,
                                                     args);
                                });
-                         }
-                         emit_causal_step();
-                       });
+                    }
+                    kiln::If(
+                        IntersectsDiagonal(args.qi, args.ki, normalized_tiling),
+                        [&] {  // REF_CAPTURE_OK=called synchronously
+                          EmitGridStep(config, normalized_tiling, args,
+                                       single_kv_step, has_padding,
+                                       /*intersects_causal_diag=*/true);
+                        },
+                        [&] {  // REF_CAPTURE_OK=called synchronously
+                          EmitGridStep(config, normalized_tiling, args,
+                                       single_kv_step, has_padding,
+                                       /*intersects_causal_diag=*/false);
+                        });
+                  });
             } else {
-              // Scratch accumulators are reused across `qi` and reset at
-              // `ki == 0`. With a sliding window, `ki == 0` can be outside the
-              // window and skipped, so reset before the causal guard.
               if (!single_kv_step) {
                 kiln::If(args.ki == 0,
                          [&] {  // REF_CAPTURE_OK=called synchronously
                            InitSoftmaxScratch(config, normalized_tiling, args);
                          });
               }
-              if (config.is_causal) {
-                kiln::If(BelowOrOnDiagonal(args.qi, args.ki, config,
-                                           normalized_tiling),
-                         emit_causal_step);
-              } else {
-                EmitGridStep(config, normalized_tiling, args, single_kv_step,
-                             has_padding, /*intersects_causal_diag=*/false);
-              }
+              EmitGridStep(config, normalized_tiling, args, single_kv_step,
+                           has_padding, /*intersects_causal_diag=*/false);
             }
 
             if (!single_kv_step) {
