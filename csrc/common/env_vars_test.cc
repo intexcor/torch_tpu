@@ -17,10 +17,12 @@
 #include "csrc/common/env_vars.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "absl/log/absl_check.h"
 #include "c10/util/Exception.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -153,6 +155,30 @@ TEST(EnvVarsTest, GetIntegerEnvOnceReturnsNulloptOnInvalidValue) {
   setenv(kTorchTpuHandshakePortEnvVar, "invalid_int", 1);
   EXPECT_EQ((GetIntegerEnvOnce<int, kTorchTpuHandshakePortEnvVar>()),
             std::nullopt);
+}
+
+TEST(EnvVarsDeathTest, EnsureRankIsExpandedInEnvVars) {
+  // The rank is expanded and memoized at most once per process, and other tests
+  // in this binary read RANK, so this runs in a subprocess where the env vars
+  // are set before anything reads them. Use the "threadsafe" style, which
+  // re-executes the test binary, since the "fast" style forks the current
+  // process and inherits its memoized env vars.
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(
+      {
+        SetEnv<kXlaFlagsEnvVar>("--xla_disable_hlo_passes=some_pass_${RANK}");
+        SetEnv<kLibtpuInitArgsEnvVar>("some_args_${RANK}");
+        SetEnv<kRankEnvVar>("1234");
+
+        EnsureRankIsExpandedInEnvVars();
+
+        ABSL_CHECK_EQ(ExpandAndGetXlaFlagsEnvVarOnce().value_or(""),
+                      "--xla_disable_hlo_passes=some_pass_1234");
+        ABSL_CHECK_EQ(ExpandAndGetLibtpuInitArgsEnvVarOnce().value_or(""),
+                      "some_args_1234");
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
 }
 
 }  // namespace

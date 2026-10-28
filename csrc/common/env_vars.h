@@ -457,6 +457,23 @@ template <typename IntType, const char* name>
   return value;
 }
 
+// Ensures that the rank is expanded in environment variables that depend on it.
+// It may overwrite the env vars when called for the first time, and has no
+// effect on subsequent calls.
+void EnsureRankIsExpandedInEnvVars();
+
+// Returns the value of the XLA_FLAGS env var, with the "${RANK}" placeholder
+// expanded to the current rank.
+//
+// Returns std::nullopt if the env var is not set.
+[[nodiscard]] std::optional<std::string> ExpandAndGetXlaFlagsEnvVarOnce();
+
+// Returns the value of the LIBTPU_INIT_ARGS env var, with the "${RANK}"
+// placeholder expanded to the current rank.
+//
+// Returns std::nullopt if the env var is not set.
+[[nodiscard]] std::optional<std::string> ExpandAndGetLibtpuInitArgsEnvVarOnce();
+
 }  // namespace torch_tpu
 
 #endif  // TORCH_TPU_CSRC_COMMON_ENV_VARS_H_

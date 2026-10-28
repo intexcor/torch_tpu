@@ -104,7 +104,6 @@ torch_tpu_cc_test(
         "//csrc/common:error_utils",
         "//csrc/common:oss_test_main",
         "//csrc/common:status_test_utils",
-        "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_matchers",
         "@xla//xla/pjrt:pjrt_client",
