@@ -290,6 +290,39 @@ TEST_F(KilnE2eTest, SpliceStablehloIntoKernelBody) {
                 /*error_spec=*/std::nullopt, /*needs_hlo_passes=*/true);
 }
 
+// CHLO is legalized before splicing; the scalar broadcast it adds folds away.
+TEST_F(KilnE2eTest, SpliceStablehloLegalizesChlo) {
+  constexpr int64_t kRows = 8, kCols = 128;
+  constexpr char kModule[] = R"mlir(
+    module {
+      func.func @main(%a: tensor<8x128xf32>) -> tensor<8x128xf32> {
+        %two = stablehlo.constant dense<2.0> : tensor<f32>
+        %out = chlo.broadcast_multiply %a, %two : (tensor<8x128xf32>, tensor<f32>) -> tensor<8x128xf32>
+        return %out : tensor<8x128xf32>
+      }
+    })mlir";
+
+  TT_ASSERT_OK_AND_ASSIGN(
+      Kernel kernel,
+      CreateKernel(GridSpec{.name = "splice_chlo_e2e", .grid = {1}},
+                   InSpec{f32(kRows, kCols)}, OutSpec{f32(kRows, kCols)},
+                   [&](Ref a, Ref out) {
+                     TT_ASSERT_OK_AND_ASSIGN(
+                         Tile result, SpliceStablehlo(kModule, {Tile(a)}));
+                     out = result;
+                   }));
+
+  xla::Literal a = Make2dF32(kRows, kCols, [](int64_t r, int64_t c) {
+    return static_cast<float>(r - 4) * 0.5f;
+  });
+  xla::Literal expected = Make2dF32(kRows, kCols, [&](int64_t r, int64_t c) {
+    return 2.0f * a.Get<float>({r, c});
+  });
+
+  RunAndCompare(std::move(kernel), {&a}, expected,
+                /*error_spec=*/std::nullopt, /*needs_hlo_passes=*/true);
+}
+
 TEST_F(KilnE2eTest, TileAndScalarControlFlowOperations) {
   constexpr int64_t kRows = 8, kCols = 128;
 

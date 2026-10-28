@@ -30,6 +30,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/LogicalResult.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -44,8 +45,11 @@
 #include "mlir/IR/Types.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Parser/Parser.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Transforms/Passes.h"
 #include "stablehlo/dialect/StablehloOps.h"
+#include "stablehlo/transforms/Passes.h"
 
 namespace torch_tpu::kiln {
 namespace {
@@ -147,6 +151,14 @@ absl::StatusOr<Tile> SpliceStablehlo(std::string_view mlir_text,
           llvm::StringRef(mlir_text.data(), mlir_text.size()), b.getContext());
   TT_RET_CHECK(module, error::kInvalidArgument)
       << "failed to parse the StableHLO module";
+  // Add CHLO pass (needed for some ops like integer floor division)
+  mlir::PassManager pm(b.getContext());
+  pm.nest<mlir::func::FuncOp>().addPass(
+      mlir::stablehlo::createChloLegalizeToStablehloPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+  const bool legalized = llvm::succeeded(pm.run(*module));
+  TT_RET_CHECK(legalized, error::kInternal)  // ERROR_COV_INFEASIBLE=not by mods
+      << "failed to legalize the module to StableHLO";
   auto main = module->lookupSymbol<mlir::func::FuncOp>("main");
   TT_RET_CHECK(main, error::kInvalidArgument) << "module has no @main";
   TT_RET_CHECK(main.getNumArguments() == args.size(), error::kInvalidArgument)

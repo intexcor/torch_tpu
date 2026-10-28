@@ -25,7 +25,7 @@
 
 namespace torch_tpu::kiln {
 
-// Inlines the StableHLO module `mlir_text` into the kernel at the current
+// Inlines the StableHLO/CHLO module `mlir_text` into the kernel at the current
 // point and returns its result as a Tile.
 //
 // `@main` must take one tensor argument per entry of `args`, matching its

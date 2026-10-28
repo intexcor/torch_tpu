@@ -43,6 +43,7 @@
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LLVM.h"
+#include "stablehlo/dialect/ChloOps.h"
 #include "stablehlo/dialect/StablehloOps.h"
 #include "xla/mosaic/dialect/tpu/tpu_dialect.h"
 #include "xla/mosaic/dialect/tpu/transforms/serde.h"
@@ -169,7 +170,7 @@ std::unique_ptr<mlir::MLIRContext> CreateMlirContextWithDialects() {
                   mlir::memref::MemRefDialect, mlir::vector::VectorDialect,
                   mlir::scf::SCFDialect, mlir::tpu::TPUDialect,
                   mlir::math::MathDialect, mlir::tensor::TensorDialect,
-                  mlir::stablehlo::StablehloDialect>();
+                  mlir::chlo::ChloDialect, mlir::stablehlo::StablehloDialect>();
   auto context = std::make_unique<mlir::MLIRContext>(registry);
   context->loadAllAvailableDialects();
   context->allowUnregisteredDialects();
