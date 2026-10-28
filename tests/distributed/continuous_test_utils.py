@@ -146,8 +146,18 @@ class TpuMultiProcContinuousTest(
       base_seed = cls.choose_seed() if seed is None else seed
       seed_test_utils.seed_rngs(base_seed + cls.rank)
 
+    # Workers call test methods directly, so `SeededTest.setUp()`, which resets
+    # Dynamo and lifts its recompile limit, only runs in the parent. Do the same
+    # here: otherwise every compiled program of earlier tests stays in the
+    # worker's Dynamo caches, and code objects shared across tests (such as the
+    # wrapper of every `spmd_safe` function) hit the recompile limit, which is
+    # a hard failure under `fullgraph=True`.
+    torch._dynamo.reset()  # pylint: disable=protected-access
     try:
-      with mock.patch.object(common_utils, "set_rng_seed", seed_rngs_for_rank):
+      with (
+          mock.patch.object(common_utils, "set_rng_seed", seed_rngs_for_rank),
+          torch._dynamo.utils.disable_cache_limit(),  # pylint: disable=protected-access
+      ):
         super()._run_test_given_id(test_id, **kwargs)
     finally:
       # Fence between tests: no rank reports completion (and thus starts the
