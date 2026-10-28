@@ -15,9 +15,8 @@ SUPPORTED_PYTHON_VERSIONS = [
 # version; free-threaded variants (e.g. "3.14t") share the same minor-version
 # toolchain registration and select the free-threaded build via
 # --@rules_python//python/config_settings:py_freethreaded=yes.
-# See https://github.com/google-pytorch/torch_tpu/issues/4647 for upgrading
-# rules_python to >=2.2.0 and switching pip.parse to pure-Starlark wheel
-# downloads.
+# See https://github.com/google-pytorch/torch_tpu/issues/4647 for switching
+# pip.parse to pure-Starlark wheel downloads.
 _CPYTHON_MINOR_VERSIONS = [
     v
     for v in SUPPORTED_PYTHON_VERSIONS
@@ -34,17 +33,18 @@ DEFAULT_PYTHON_VERSION = "3.14"
 bazel_dep(name = "abseil-cpp", version = "20260526.0", repo_name = "com_google_absl")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "curl", version = "8.11.0")
-bazel_dep(name = "rules_cc", version = "0.2.18")
-bazel_dep(name = "rules_python", version = "1.8.5")
+bazel_dep(name = "rules_cc", version = "0.2.25")
+bazel_dep(name = "rules_python", version = "2.4.5")
+bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "rules_testing", version = "0.7.0")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "platforms", version = "1.1.0")
-bazel_dep(name = "protobuf", version = "33.5", repo_name = "com_google_protobuf")
+bazel_dep(name = "protobuf", version = "33.6", repo_name = "com_google_protobuf")
 bazel_dep(name = "googletest", version = "1.15.2", repo_name = "com_google_googletest")
 bazel_dep(name = "grpc", version = "1.78.0", repo_name = "com_github_grpc_grpc")
 bazel_dep(name = "googleapis", version = "0.0.0-20240819-fe8ba054a")
-bazel_dep(name = "highway", version = "1.3.0")
+bazel_dep(name = "highway", version = "1.4.0")
 bazel_dep(name = "re2", version = "2025-11-05.bcr.1", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "tcmalloc", version = "0.0.0-20250927-12f2552", repo_name = "com_google_tcmalloc")
 
@@ -59,18 +59,6 @@ single_version_override(
     module_name = "curl",
     patches = ["//bazel/patches/curl:remove_linker_script.patch"],
     version = "8.11.0",
-)
-
-single_version_override(
-    module_name = "rules_python",
-    patch_strip = 1,
-    patches = [
-        "//bazel/patches/rules_python:rules_python_pip_version.patch",
-        "//bazel/patches/rules_python:rules_python_freethreaded.patch",
-        "//bazel/patches/rules_python:rules_python_versions.patch",
-        "//bazel/patches/rules_python:rules_python_scope.patch",
-    ],
-    version = "1.8.5",
 )
 
 single_version_override(
@@ -160,6 +148,15 @@ python.defaults(
 
 # Pip extension
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+
+# Disable rules_python 2.x's default SimpleAPI wheel downloader until #4647 is
+# completed so spoke repositories keep their `<hub>_<py>_<pkg>` names (note:
+# `_configure` in `extension.bzl` ignores empty strings via `if value:` until
+# https://github.com/bazel-contrib/rules_python/pull/4376 is released, whereas
+# `"/"` passes `_configure` and is stripped to `""` by `.rstrip("/")`).
+pip.default(
+    index_url = "/",
+)
 
 # Shared torch pip-hub configuration, factored out so the default hub and the
 # per-version hubs below cannot drift. Every torch hub exposes the same split

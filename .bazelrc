@@ -20,6 +20,11 @@ common --repo_env=HERMETIC_PYTHON_VERSION=3.14
 
 common --enable_bzlmod=true --enable_workspace=false
 
+# Autoload rules removed from Bazel 9 built-ins for transitive dependencies
+# (such as @rules_ml_toolchain, @cel-spec, and @protoc-gen-validate) that do
+# not yet have explicit load() statements.
+common --incompatible_autoload_externally=+@rules_cc,+@rules_java,+@rules_python,+@rules_shell,+@com_google_protobuf
+
 # Config to enable legacy WORKSPACE. Use with --config=workspace.
 common:workspace --enable_bzlmod=false
 common:workspace --enable_workspace=true

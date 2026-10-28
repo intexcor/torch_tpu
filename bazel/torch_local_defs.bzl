@@ -77,7 +77,11 @@ def define_torch_local(name, is_source_mode = True):
                 "build/**/*.tcc",
                 "build/**/*.inc",
             ], venv_mode = True),
+            exclude = py_library_source_mapping([
+                "torch/include/google/protobuf/**",
+            ], venv_mode = True),
         ),
+        features = ["system_include_paths"],
         includes = py_library_source_mapping([
             "include",  # Standard install layout
             "aten/src",

@@ -29,8 +29,11 @@ def define_extra_torch_targets():
                 "site-packages/torch/include/*.h",
                 "site-packages/torch/include/*.hpp",
             ],
-            exclude = [],
+            exclude = [
+                "site-packages/torch/include/google/protobuf/**",
+            ],
         ),
+        features = ["system_include_paths"],
         # NOTE: There's a Bazel bug with strip_include_prefix where it
         # incorrectly thinks files provided by another target using
         # a strip_include_prefix of a sub-directory aren't being correctly
