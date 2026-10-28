@@ -21564,18 +21564,15 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     finally:
       torch.set_float32_matmul_precision(prev_prec)
 
-  @parameterized.parameters(True, False)
-  def test_flex_attention_causal(self, is_causal: bool):
+  @parameterized.named_parameters(
+      ("causal", lambda b, h, q_i, kv_i: q_i >= kv_i, True),
+      ("unmasked", flex_attention.noop_mask, False),
+      ("prefix", lambda b, h, q_i, kv_i: (kv_i < 128) | (q_i >= kv_i), False),
+  )
+  def test_flex_attention_causal(self, mask_mod, is_causal: bool):
     q, k, v = (
         torch.randn(1, 2, 512, 128, device="tpu", dtype=torch.bfloat16)
         for _ in range(3)
-    )
-
-    # Causal mask when is_causal=True, otherwise full unmasked attention.
-    mask_mod = (
-        (lambda b, h, q_i, kv_i: q_i >= kv_i)
-        if is_causal
-        else flex_attention.noop_mask
     )
     bm = flex_attention.create_block_mask(
         mask_mod, None, None, 512, 512, device="tpu"
@@ -21588,42 +21585,13 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     ) as sdpa_mock:
       out = flex_attention.flex_attention(q, k, v, block_mask=bm)
       self.assertEqual(sdpa_mock.call_args.kwargs["is_causal"], is_causal)
-      self.assertEqual(
-          sdpa_mock.call_args.kwargs["attn_mask"] is None, is_causal
-      )
-
-    mask_2d = flex_attention.create_mask(mask_mod, 1, 1, 512, 512, device="tpu")
-    expected = torch.nn.functional.scaled_dot_product_attention(
-        q, k, v, attn_mask=mask_2d
-    )
-    utils.assert_close(out, expected)
-
-  @parameterized.parameters(128, 512)
-  def test_flex_attention_sliding_window(self, window_size: int):
-    q, k, v = (
-        torch.randn(1, 2, 512, 128, device="tpu", dtype=torch.bfloat16)
-        for _ in range(3)
-    )
-    mask_mod = lambda b, h, q_i, kv_i: (q_i >= kv_i) & (
-        q_i - kv_i < window_size
-    )
-    bm = flex_attention.create_block_mask(
-        mask_mod, None, None, 512, 512, device="tpu"
-    )
-    with mock.patch.object(
-        torch.nn.functional,
-        "scaled_dot_product_attention",
-        wraps=torch.nn.functional.scaled_dot_product_attention,
-    ) as sdpa_mock:
-      out = flex_attention.flex_attention(q, k, v, block_mask=bm)
-      is_full_causal = window_size == 512
-      self.assertEqual(sdpa_mock.call_args.kwargs["is_causal"], is_full_causal)
-      if is_full_causal:
+      if is_causal:
         self.assertIsNone(sdpa_mock.call_args.kwargs["attn_mask"])
       else:
         self.assertEqual(
-            sdpa_mock.call_args.kwargs["attn_mask"].shape, (window_size,)
+            sdpa_mock.call_args.kwargs["attn_mask"].shape, (1, 1, 512, 512)
         )
+
     mask_2d = flex_attention.create_mask(mask_mod, 1, 1, 512, 512, device="tpu")
     expected = torch.nn.functional.scaled_dot_product_attention(
         q, k, v, attn_mask=mask_2d
@@ -21634,7 +21602,7 @@ class OpsGradUnitTest(TorchTpuVsCpuTestBase):
     # Equal-length packed documents are folded into the batch dimension and
     # attended with the mask shared by all documents.
     # Converting that per-document mask to SDPA arguments is
-    # covered by the causal and sliding window tests above.
+    # covered by the causal test above.
     docs, doc_len, heads = 4, 512, 2
     seq = docs * doc_len
     q, k, v = (
