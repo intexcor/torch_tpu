@@ -81,11 +81,14 @@ SampleInput = core.SampleInput  # pylint: disable=protected-access
 CheckValueMode = test_utils.CheckValueMode
 Tolerance = test_utils.Tolerance
 DynamismMode = dynamism_test_utils.DynamismMode
+DynamismCoverageMode = dynamism_test_utils.DynamismCoverageMode
+DynamicMarkingPlan = dynamism_test_utils.DynamicMarkingPlan
 
 AccuracyOverrides = Mapping[str, Mapping[torch.dtype, Mapping[str, Tolerance]]]
 
 FilterFn = Callable[..., str | None]
 MarkDynamicFn = Callable[..., None]
+GeneratePlansFn = Callable[..., Sequence[DynamicMarkingPlan]]
 
 GPU_SM90: Final[str] = "gpu_sm90"
 GPU_SM100: Final[str] = "gpu_sm100"
@@ -187,6 +190,26 @@ _CHECK_DYNAMISM_USING_SEED: Final[flags.FlagHolder[int]] = flags.DEFINE_integer(
     "Only picks dimensions with size >=2, "
     "and bounds for size+10. Allows for explicitly setting the seed value for "
     "reproducibility, or -1 for random seed.",
+)
+
+_DYNAMISM_COVERAGE_MODE: Final[flags.FlagHolder[DynamismCoverageMode]] = (
+    flags.DEFINE_enum_class(
+        "dynamism_coverage_mode",
+        DynamismCoverageMode.RANDOM_DIM,
+        DynamismCoverageMode,
+        "Coverage strategy for marking input dimensions dynamic when"
+        " --check_dynamism_using_seed is non-zero. 'random_dim' marks one"
+        " randomly chosen candidate dimension per sample; 'exhaustive' tests"
+        " every candidate dimension individually plus all candidate dimensions"
+        " simultaneously on OpVariant.BASE.",
+    )
+)
+
+_DYNAMISM_PLAN_FILTER: Final[flags.FlagHolder[str]] = flags.DEFINE_string(
+    "dynamism_plan_filter",
+    "",
+    "If non-empty, only runs the DynamicMarkingPlan whose label matches this"
+    " string (e.g. 'dim0' or 'dims_0_1').",
 )
 
 _CHECK_SYMBOLIC_SHAPES: Final[flags.FlagHolder[bool]] = flags.DEFINE_bool(
@@ -5011,6 +5034,7 @@ class TorchTpuTestBase(seed_test_utils.RepeatableTest, common_utils.TestCase):
 
   dynamism_filter_fn: FilterFn
   dynamism_mark_dynamic_fn: MarkDynamicFn
+  dynamism_generate_plans_fn: GeneratePlansFn
 
   tpu_gpu_accuracy_overrides: AccuracyOverrides
   grad_gpu_accuracy_overrides: AccuracyOverrides
@@ -5073,18 +5097,22 @@ class TorchTpuTestBase(seed_test_utils.RepeatableTest, common_utils.TestCase):
       self,
       filter_fn: FilterFn,
       mark_dynamic_fn: MarkDynamicFn,
+      generate_plans_fn: GeneratePlansFn,
   ) -> None:
-    """Sets the dynamism handler for bounded dynamism testing.
+    """Sets the dynamism handlers for bounded dynamism testing.
 
     Args:
       filter_fn: A function that returns None if the op should be tested for
         dynamism, or a string with the reason to skip if not.
       mark_dynamic_fn: A function that marks an input tensor as dynamic as well
         as any dependent arguments that should be marked dynamic as well.
+      generate_plans_fn: A function generating one or more `DynamicMarkingPlan`s
+        for a sample.
     """
 
     self.dynamism_filter_fn = filter_fn
     self.dynamism_mark_dynamic_fn = mark_dynamic_fn
+    self.dynamism_generate_plans_fn = generate_plans_fn
 
   def set_symbolic_shapes_known_failures(
       self, known_failures: Mapping[str, str]
@@ -5457,6 +5485,8 @@ class OpInfoTestBase(TorchTpuTestBase):
       use_compiled: bool = False,
       measure_perf: bool = False,
       out_dtype_override: torch.dtype | None = None,
+      marking_plan: DynamicMarkingPlan | None = None,
+      dynamism_seed: int | None = None,
   ) -> Any:
     """Run the op on the given device.
 
@@ -5482,6 +5512,10 @@ class OpInfoTestBase(TorchTpuTestBase):
       measure_perf: If True, measure the performance of the op.
       out_dtype_override: The data type of the out tensor to use when testing
         out-variant dtype casting.
+      marking_plan: Optional deterministic dynamic marking plan to apply when
+        running in dynamic mode.
+      dynamism_seed: Optional deterministic seed used when applying or resolving
+        dynamic marking.
 
     Returns:
       When compute_grad is false: the result of the op, transferred to the CPU
@@ -5508,6 +5542,8 @@ class OpInfoTestBase(TorchTpuTestBase):
           check_device=check_device,
           use_compiled=use_compiled,
           out_dtype_override=out_dtype_override,
+          marking_plan=marking_plan,
+          dynamism_seed=dynamism_seed,
       )
       if isinstance(out, Exception):
         return out
@@ -5532,6 +5568,8 @@ class OpInfoTestBase(TorchTpuTestBase):
           op_input,
           device_op_input,
           use_compiled=use_compiled,
+          marking_plan=marking_plan,
+          dynamism_seed=dynamism_seed,
       )
     if use_compiled:
       op_func = self._compile(
@@ -5619,6 +5657,8 @@ class OpInfoTestBase(TorchTpuTestBase):
       check_device: bool,
       use_compiled: bool,
       out_dtype_override: torch.dtype | None,
+      marking_plan: DynamicMarkingPlan | None = None,
+      dynamism_seed: int | None = None,
   ) -> Any:
     """Returns the out argument for running the out variant of the op.
 
@@ -5643,6 +5683,8 @@ class OpInfoTestBase(TorchTpuTestBase):
         # This _run_op() call is for preparing test data, not part of the test
         # itself, so don't measure its performance to avoid skewing metrics.
         measure_perf=False,
+        marking_plan=marking_plan,
+        dynamism_seed=dynamism_seed,
     )
     if isinstance(base_result, Exception):
       return base_result
@@ -5665,6 +5707,8 @@ class OpInfoTestBase(TorchTpuTestBase):
       device_op_input: OpInput,
       *,
       use_compiled: bool,
+      marking_plan: DynamicMarkingPlan | None = None,
+      dynamism_seed: int | None = None,
   ) -> None:
     """Marks dimensions of `device_op_input` dynamic, or skips the test."""
     op_name = _op_name_for_logging(op, variant)
@@ -5682,17 +5726,24 @@ class OpInfoTestBase(TorchTpuTestBase):
     if skip is not None:
       self.skipTest(skip)
 
-    # Use a seed value to enable reproducing a failure deterministically.
-    seed = _CHECK_DYNAMISM_USING_SEED.value
-    seed = seed if seed > 0 else (time.time_ns() % 100000)
-    print(f">>>> Reproduce using `--check_dynamism_using_seed={seed}`")
+    assert dynamism_seed is not None
+    plan_flag = (
+        f" --dynamism_plan_filter={marking_plan.label}"
+        if marking_plan is not None
+        else ""
+    )
+    print(
+        f">>>> Reproduce using `--check_dynamism_using_seed={dynamism_seed}"
+        f"{plan_flag}`"
+    )
     self.dynamism_mark_dynamic_fn(
-        seed,
+        dynamism_seed,
         op,
         device_op_input.input_value,
         device_op_input.args,
         mode=dynamism_mode,
         kwargs=device_op_input.kwargs,
+        plan=marking_plan,
     )
 
   def _compile(
@@ -6233,23 +6284,118 @@ class OpInfoTestBase(TorchTpuTestBase):
             check_dtype=check_dtype,
             skip_output_indices=skip_output_indices,
         )
-      for perf_run_idx in range(_NUM_RUNS_PER_SUBTEST.value):
-        self._subtests_run += 1
-        with self.subTest(subtest_name=subtest_name, run_index=perf_run_idx):
-          _run_and_print_exception(
-              functools.partial(
-                  test,
-                  subtest_name,
-                  op,
-                  variant,
-                  dtype,
-                  golden_input=golden_input,
-                  check_device=check_device,
-                  compute_grad=compute_grad,
-                  use_compiled=use_compiled,
-                  out_dtype_override=out_dtype_override,
-              )
+      dynamism_skip, dynamism_seed, marking_plans = (
+          self._resolve_dynamism_plans(
+              op, variant, golden_input, use_compiled=use_compiled
           )
+      )
+      if dynamism_skip is not None:
+        self._subtests_run += 1
+        with self.subTest(subtest_name=subtest_name, run_index=0):
+          _run_and_print_exception(
+              lambda reason=dynamism_skip: self.skipTest(reason)
+          )
+        continue
+
+      append_plan_label = bool(
+          _DYNAMISM_PLAN_FILTER.value
+          or (
+              variant == OpVariant.BASE
+              and _DYNAMISM_COVERAGE_MODE.value
+              == DynamismCoverageMode.EXHAUSTIVE
+          )
+      )
+      for marking_plan in marking_plans:
+        plan_subtest_name = (
+            f"{subtest_name}_{marking_plan.label}"
+            if append_plan_label and marking_plan is not None
+            else subtest_name
+        )
+        for perf_run_idx in range(_NUM_RUNS_PER_SUBTEST.value):
+          self._subtests_run += 1
+          with self.subTest(
+              subtest_name=plan_subtest_name, run_index=perf_run_idx
+          ):
+            _run_and_print_exception(
+                functools.partial(
+                    test,
+                    plan_subtest_name,
+                    op,
+                    variant,
+                    dtype,
+                    golden_input=golden_input,
+                    check_device=check_device,
+                    compute_grad=compute_grad,
+                    use_compiled=use_compiled,
+                    out_dtype_override=out_dtype_override,
+                    marking_plan=marking_plan,
+                    dynamism_seed=dynamism_seed,
+                )
+            )
+
+  def _resolve_dynamism_plans(
+      self,
+      op: OpInfo,
+      variant: OpVariant,
+      golden_input: OpInput,
+      *,
+      use_compiled: bool,
+  ) -> tuple[str | None, int | None, Sequence[DynamicMarkingPlan | None]]:
+    """Resolves dynamism skip reason, seed, and marking plans for a sample."""
+    if not _CHECK_DYNAMISM_USING_SEED.value or _CHECK_SYMBOLIC_SHAPES.value:
+      return None, None, (None,)
+
+    dynamism_mode = DynamismMode.COMPILE if use_compiled else DynamismMode.EAGER
+    skip = self.dynamism_filter_fn(
+        op, golden_input.input_value, golden_input.args, mode=dynamism_mode
+    )
+    if skip is not None:
+      return skip, None, ()
+
+    seed = _CHECK_DYNAMISM_USING_SEED.value
+    seed = seed if seed > 0 else (time.time_ns() % 100000)
+
+    plan_filter = _DYNAMISM_PLAN_FILTER.value
+    if plan_filter:
+      # Generate the full plan list when filtering by an explicit plan label so
+      # multi-dim or non-random plans can always be reproduced directly.
+      effective_coverage_mode = DynamismCoverageMode.EXHAUSTIVE
+    elif variant == OpVariant.BASE:
+      effective_coverage_mode = _DYNAMISM_COVERAGE_MODE.value
+    else:
+      # Full (EXHAUSTIVE) plan sweeps are restricted to OpVariant.BASE; OUT and
+      # INPLACE variants run a single representative plan.
+      effective_coverage_mode = DynamismCoverageMode.RANDOM_DIM
+
+    plans = list(
+        self.dynamism_generate_plans_fn(
+            op,
+            golden_input.input_value,
+            golden_input.args,
+            golden_input.kwargs,
+            mode=dynamism_mode,
+            coverage_mode=effective_coverage_mode,
+            seed=seed,
+        )
+    )
+    if not plans:
+      return "No valid input dimensions to mark dynamic.", None, ()
+
+    if plan_filter:
+      available = [p.label for p in plans]
+      plans = [p for p in plans if p.label == plan_filter]
+      if not plans:
+        return (
+            (
+                "No dynamic marking plan matched"
+                f" --dynamism_plan_filter={plan_filter!r} (available:"
+                f" {available})."
+            ),
+            None,
+            (),
+        )
+
+    return None, seed, tuple(plans)
 
   def _assert_known_symbolic_shapes_failure_seen(
       self, op_name: str, variant_test_name: str | None

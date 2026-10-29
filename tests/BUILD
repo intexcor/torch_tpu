@@ -1033,6 +1033,7 @@ torch_tpu_py_test(
     srcs = ["ops_test.py"],
     args = [
         "--check_dynamism_using_seed=-1",
+        "--dynamism_coverage_mode=exhaustive",
         "--use_compiled=True",
         "--print_op_inputs=1",
         "--max_samples_per_op_dtype=1",  # No need to test many samples to catch dynamism bugs.
@@ -1044,7 +1045,7 @@ torch_tpu_py_test(
         "requires-tpu-v6e",
         "requires-tpu-v5lite",
     ],
-    shard_count = 32,
+    shard_count = 50,
     tags = [
         "nomsan",  # TODO: fix the test in msan mode.
         "notsan",  # TODO: fix the test in tsan mode.
